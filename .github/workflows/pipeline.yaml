@@ -8,6 +8,9 @@ jobs :
 
         steps :
             - uses: actions/checkout@v4
-            - run : echo "code running"
+            - run : pwd
+            - run : ls -la
+            - run : python --version
+            - run : echo "completed the steps "
      
 
