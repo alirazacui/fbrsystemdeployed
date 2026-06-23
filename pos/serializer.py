@@ -5,7 +5,7 @@ pos/serializers.py  — Product & Category section
 """
  
 from rest_framework import serializers
-from .models import Category, Product
+from .models import *
  
  
 # ---------------------------------------------------------------------------
@@ -905,3 +905,198 @@ class CompleteSaleSerializer(serializers.Serializer):
             )
  
         return attrs
+    
+"""
+========================================================
+pos/return_serializers.py
+Add to pos/serializers.py
+========================================================
+"""
+ 
+from rest_framework import serializers
+ 
+ 
+class SaleReturnLineInputSerializer(serializers.Serializer):
+    """Input for one return line."""
+    original_line_id  = serializers.IntegerField()
+    quantity_returned = serializers.DecimalField(
+        max_digits=12, decimal_places=3, min_value=0.001
+    )
+ 
+ 
+class CreateReturnSerializer(serializers.Serializer):
+    """
+    Creates a return against a completed sale.
+ 
+    Body:
+    {
+        "original_sale_id": 5,
+        "reason": "defective",
+        "reason_notes": "Screen cracked on delivery",
+        "lines": [
+            {"original_line_id": 12, "quantity_returned": 1},
+            {"original_line_id": 13, "quantity_returned": 2}
+        ]
+    }
+ 
+    For full return — pass all lines with full quantities.
+    For partial return — pass only the lines being returned.
+    """
+    original_sale_id = serializers.IntegerField()
+    reason           = serializers.ChoiceField(choices=ReturnReason.choices)
+    reason_notes     = serializers.CharField(
+        required=False, default="", max_length=500
+    )
+    lines = serializers.ListField(
+        child=SaleReturnLineInputSerializer(),
+        min_length=1,
+        help_text="At least one line must be returned.",
+    )
+ 
+    def validate_original_sale_id(self, sale_id):
+        from pos.models import Sale, SaleStatus
+        request = self.context["request"]
+        try:
+            sale = Sale.objects.get(
+                pk      = sale_id,
+                company = request.user.company,
+                status  = SaleStatus.COMPLETED,
+            )
+        except Sale.DoesNotExist:
+            raise serializers.ValidationError(
+                "Sale not found, does not belong to your company, "
+                "or is not in COMPLETED status."
+            )
+ 
+        # Check FBR invoice exists
+        if not sale.fbr_invoice_number and sale.company.module_fbr_di:
+            raise serializers.ValidationError(
+                "This sale has not been submitted to FBR yet. "
+                "Wait for FBR submission to complete before processing a return."
+            )
+ 
+        # Check if already fully returned
+        from pos.models import SaleReturn, ReturnStatus
+        existing_returns = SaleReturn.objects.filter(
+            original_sale = sale,
+            status        = ReturnStatus.COMPLETED,
+            return_type   = "full",
+        )
+        if existing_returns.exists():
+            raise serializers.ValidationError(
+                "This sale has already been fully returned."
+            )
+ 
+        self.context["original_sale"] = sale
+        return sale_id
+ 
+    def validate_lines(self, lines):
+        """Validate each return line against original sale lines."""
+        from pos.models import SaleLine
+        from pos.models import SaleReturnLine
+ 
+        original_sale = self.context.get("original_sale")
+        if not original_sale:
+            return lines
+ 
+        validated_lines = []
+        for line_data in lines:
+            line_id  = line_data["original_line_id"]
+            qty      = line_data["quantity_returned"]
+ 
+            # Line must exist on original sale
+            try:
+                original_line = SaleLine.objects.get(
+                    pk=line_id, sale=original_sale
+                )
+            except SaleLine.DoesNotExist:
+                raise serializers.ValidationError(
+                    f"Line {line_id} does not belong to this sale."
+                )
+ 
+            # Quantity cannot exceed original
+            if float(qty) > float(original_line.quantity):
+                raise serializers.ValidationError(
+                    f"Return quantity ({qty}) for '{original_line.product_name}' "
+                    f"exceeds original quantity ({original_line.quantity})."
+                )
+ 
+            # Check already-returned quantity for this line
+            already_returned = SaleReturnLine.objects.filter(
+                original_line=original_line,
+                sale_return__status="completed",
+            ).aggregate(
+                total=models.Sum("quantity_returned")
+            )["total"] or 0
+ 
+            remaining = float(original_line.quantity) - float(already_returned)
+            if float(qty) > remaining:
+                raise serializers.ValidationError(
+                    f"Only {remaining} units of '{original_line.product_name}' "
+                    f"are available for return."
+                )
+ 
+            line_data["original_line_obj"] = original_line
+            validated_lines.append(line_data)
+ 
+        return validated_lines
+ 
+ 
+class SaleReturnLineSerializer(serializers.ModelSerializer):
+    class Meta:
+        model  = SaleReturnLine
+        fields = [
+            "id", "product_name", "quantity_returned",
+            "unit_price", "tax_rate_percent",
+            "return_value_excl_tax", "return_tax",
+            "return_line_total", "stock_restored",
+        ]
+        read_only_fields = fields
+ 
+ 
+class SaleReturnSerializer(serializers.ModelSerializer):
+    """Full return detail."""
+    lines                = SaleReturnLineSerializer(many=True, read_only=True)
+    original_sale_number = serializers.CharField(
+        source="original_sale.sale_number", read_only=True
+    )
+    credit_note_number   = serializers.CharField(
+        source="credit_note_sale.sale_number",
+        read_only=True, default=None,
+    )
+    fbr_credit_note_number = serializers.CharField(
+        source="credit_note_sale.fbr_invoice_number",
+        read_only=True, default=None,
+    )
+    processed_by_email   = serializers.EmailField(
+        source="processed_by.email", read_only=True
+    )
+ 
+    class Meta:
+        model  = SaleReturn
+        fields = [
+            "id",
+            "return_number",
+            "return_type",
+            "status",
+            "reason",
+            "reason_notes",
+            "original_sale",
+            "original_sale_number",
+            "credit_note_sale",
+            "credit_note_number",
+            "fbr_credit_note_number",
+            "total_return_amount",
+            "total_return_tax",
+            "refund_amount",
+            "refund_paid",
+            "refund_paid_at",
+            "fbr_eligible",
+            "fbr_eligibility_reason",
+            "processed_by",
+            "processed_by_email",
+            "lines",
+            "created_at",
+            "completed_at",
+        ]
+        read_only_fields = fields

@@ -52,6 +52,8 @@ INSTALLED_APPS = [
     "pos",
     "digital_invoicing",
     "django_celery_beat",
+    "reports",
+
     
 ]
 

@@ -28,6 +28,7 @@ urlpatterns = [
     path("api/", include("permission_app.urls")),
     path("api/",include("pos.urls")),
     path("api/", include("digital_invoicing.urls")),
+    path("api/", include("reports.urls")),
 ]
  
 # Serve media files in development

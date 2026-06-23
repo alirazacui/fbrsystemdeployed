@@ -11,12 +11,7 @@ from rest_framework.viewsets import GenericViewSet
  
 from common.permissions import IsOwnerOrAdmin, IsClientUser, IsActiveUser
 from .models import Category, Product
-from pos.serializer import (
-    CategorySerializer,
-    ProductDetailSerializer,
-    ProductListSerializer,
-    ProductStockUpdateSerializer,
-)
+from pos.serializer import *
  
  
 class CategoryViewSet(
@@ -638,3 +633,257 @@ class SaleViewSet(GenericViewSet):
         )
         serializer = SaleListSerializer(qs, many=True)
         return Response(serializer.data)
+    
+
+"""
+========================================================
+pos/return_views.py
+Add to pos/views.py
+========================================================
+"""
+ 
+from rest_framework import mixins, status
+from rest_framework.decorators import action
+from rest_framework.response import Response
+from rest_framework.viewsets import GenericViewSet
+from django.db import transaction
+ 
+ 
+class SaleReturnViewSet(GenericViewSet):
+    """
+    Returns & Refunds management.
+ 
+    create  POST /api/returns/
+    retrieve GET  /api/returns/{id}/
+    list    GET  /api/returns/
+    confirm_refund POST /api/returns/{id}/confirm-refund/
+    """
+    permission_classes = [IsClientUser]
+ 
+    def get_queryset(self):
+        from pos.models import SaleReturn
+        user = self.request.user
+        if user.is_platform_admin:
+            return SaleReturn.objects.all()
+        return SaleReturn.objects.filter(
+            company=user.company
+        ).select_related(
+            "original_sale", "credit_note_sale",
+            "processed_by", "company"
+        ).prefetch_related("lines").order_by("-created_at")
+ 
+    @action(detail=False, methods=["post"], url_path="")
+    def create_return(self, request):
+        """
+        POST /api/returns/
+ 
+        Creates a return against a completed sale.
+        Full flow in one atomic transaction:
+        1. Validate input
+        2. Create SaleReturn + SaleReturnLines
+        3. Restore stock for returned items
+        4. Create Credit Note Sale
+        5. Trigger FBR credit note submission
+        """
+        from pos.models import (
+            SaleReturn, SaleReturnLine,
+            ReturnStatus, ReturnReason,
+        )
+        from pos.serializer import (
+            CreateReturnSerializer, SaleReturnSerializer
+        )
+        from pos.models import Sale, SaleStatus, SaleType, FBRSubmissionStatus
+ 
+        serializer = CreateReturnSerializer(
+            data=request.data,
+            context={"request": request},
+        )
+        serializer.is_valid(raise_exception=True)
+ 
+        original_sale = serializer.context["original_sale"]
+        lines_data    = serializer.validated_data["lines"]
+        reason        = serializer.validated_data["reason"]
+        reason_notes  = serializer.validated_data.get("reason_notes", "")
+ 
+        # Determine full vs partial
+        all_lines    = original_sale.lines.all()
+        return_type  = "partial"
+ 
+        # Check if all lines are being fully returned
+        all_fully_returned = all(
+            any(
+                ld["original_line_id"] == ol.pk and
+                float(ld["quantity_returned"]) >= float(ol.quantity)
+                for ld in lines_data
+            )
+            for ol in all_lines
+        )
+        if all_fully_returned and len(lines_data) == all_lines.count():
+            return_type = "full"
+ 
+        with transaction.atomic():
+            # ── Create SaleReturn ─────────────────────────────────────
+            sale_return = SaleReturn(
+                company       = request.user.company,
+                original_sale = original_sale,
+                processed_by  = request.user,
+                return_type   = return_type,
+                reason        = reason,
+                reason_notes  = reason_notes,
+                status        = ReturnStatus.PENDING,
+            )
+            sale_return.check_fbr_eligibility()
+            sale_return.save()
+ 
+            # ── Create SaleReturnLines + restore stock ─────────────────
+            total_return_amount = 0
+            total_return_tax    = 0
+ 
+            for line_data in lines_data:
+                original_line = line_data["original_line_obj"]
+                qty_returned  = line_data["quantity_returned"]
+ 
+                return_line = SaleReturnLine(
+                    sale_return       = sale_return,
+                    original_line     = original_line,
+                    product_name      = original_line.product_name,
+                    quantity_returned = qty_returned,
+                    unit_price        = original_line.unit_price,
+                    tax_rate_percent  = original_line.tax_rate_percent,
+                )
+                return_line.save()
+ 
+                total_return_amount += float(return_line.return_line_total)
+                total_return_tax    += float(return_line.return_tax)
+ 
+                # Restore stock if product tracks inventory
+                product = original_line.product
+                if product.track_inventory:
+                    product.refresh_from_db()
+                    product.current_stock = (
+                        float(product.current_stock) + float(qty_returned)
+                    )
+                    product.save(update_fields=["current_stock", "updated_at"])
+                    return_line.stock_restored = True
+                    return_line.save(update_fields=["stock_restored"])
+ 
+            # ── Update SaleReturn totals ───────────────────────────────
+            sale_return.total_return_amount = round(total_return_amount, 2)
+            sale_return.total_return_tax    = round(total_return_tax, 2)
+            sale_return.refund_amount       = round(total_return_amount, 2)
+            sale_return.status              = ReturnStatus.COMPLETED
+            sale_return.completed_at        = timezone.now()
+            sale_return.save()
+ 
+            # ── Mark original sale as returned ────────────────────────
+            if return_type == "full":
+                original_sale.status = SaleStatus.RETURNED
+                original_sale.save(update_fields=["status", "updated_at"])
+ 
+            # ── Create Credit Note Sale ───────────────────────────────
+            credit_note = Sale(
+                company       = request.user.company,
+                cashier       = request.user,
+                customer      = original_sale.customer,
+                sale_type     = SaleType.CREDIT_NOTE,
+                status        = SaleStatus.COMPLETED,
+                original_sale = original_sale,
+                subtotal      = sale_return.total_return_amount - sale_return.total_return_tax,
+                total_tax     = sale_return.total_return_tax,
+                total_amount  = sale_return.total_return_amount,
+                amount_paid   = sale_return.total_return_amount,
+                notes         = (
+                    f"Credit Note for return {sale_return.return_number}. "
+                    f"Reason: {sale_return.get_reason_display()}"
+                ),
+                completed_at  = timezone.now(),
+            )
+            credit_note.save()
+ 
+            # ── Create credit note lines (negative quantities) ─────────
+            from pos.models import SaleLine
+            for return_line in sale_return.lines.all():
+                orig = return_line.original_line
+                SaleLine.objects.create(
+                    sale               = credit_note,
+                    product            = orig.product,
+                    product_name       = return_line.product_name,
+                    hs_code            = orig.hs_code,
+                    unit_of_measure    = orig.unit_of_measure,
+                    fbr_sale_type      = orig.fbr_sale_type,
+                    tax_rate_percent   = orig.tax_rate_percent,
+                    quantity           = return_line.quantity_returned,
+                    unit_price         = return_line.unit_price,
+                    discount_amount    = 0,
+                    sales_tax_withheld = orig.sales_tax_withheld,
+                    further_tax        = orig.further_tax,
+                    extra_tax          = orig.extra_tax,
+                    fed_payable        = orig.fed_payable,
+                    fixed_retail_price = orig.fixed_retail_price,
+                    sro_schedule_no    = orig.sro_schedule_no,
+                    sro_item_serial_no = orig.sro_item_serial_no,
+                    value_excl_tax     = return_line.return_value_excl_tax,
+                    sales_tax_applicable = return_line.return_tax,
+                    line_total         = return_line.return_line_total,
+                )
+ 
+            # ── Link credit note to return ─────────────────────────────
+            sale_return.credit_note_sale = credit_note
+            sale_return.save(update_fields=["credit_note_sale"])
+ 
+            # ── Trigger FBR credit note submission ────────────────────
+            if sale_return.fbr_eligible and request.user.company.module_fbr_di:
+                credit_note.fbr_submission_status = FBRSubmissionStatus.PENDING
+                credit_note.save(update_fields=["fbr_submission_status"])
+                from digital_invoicing.tasks import submit_invoice_to_fbr
+                submit_invoice_to_fbr.delay(credit_note.pk)
+            else:
+                credit_note.fbr_submission_status = FBRSubmissionStatus.SKIPPED
+                credit_note.save(update_fields=["fbr_submission_status"])
+ 
+        return Response(
+            SaleReturnSerializer(sale_return).data,
+            status=status.HTTP_201_CREATED,
+        )
+ 
+    @action(detail=True, methods=["post"], url_path="confirm-refund")
+    def confirm_refund(self, request, pk=None):
+        """
+        POST /api/returns/{id}/confirm-refund/
+ 
+        Marks the cash refund as physically paid to customer.
+        Called after cashier hands cash back to customer.
+        """
+        from pos.models import SaleReturn
+        from pos.serializer import SaleReturnSerializer
+ 
+        sale_return = self.get_object()
+ 
+        if sale_return.refund_paid:
+            return Response(
+                {"detail": "Refund has already been marked as paid."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+ 
+        sale_return.refund_paid    = True
+        sale_return.refund_paid_at = timezone.now()
+        sale_return.save(update_fields=["refund_paid", "refund_paid_at", "updated_at"])
+ 
+        return Response(SaleReturnSerializer(sale_return).data)
+ 
+    @action(detail=False, methods=["get"], url_path="list")
+    def list_returns(self, request):
+        """GET /api/returns/list/"""
+        from pos.serializer import SaleReturnSerializer
+        qs         = self.get_queryset()
+        page       = self.paginate_queryset(qs)
+        serializer = SaleReturnSerializer(page or qs, many=True)
+        if page is not None:
+            return self.get_paginated_response(serializer.data)
+        return Response(serializer.data)
+ 
+    @action(detail=True, methods=["get"], url_path="detail")
+    def retrieve_return(self, request, pk=None):
+        """GET /api/returns/{id}/detail/"""
+        from pos.serializer import SaleReturnSerializer
+        return Response(SaleReturnSerializer(self.get_object()).data)

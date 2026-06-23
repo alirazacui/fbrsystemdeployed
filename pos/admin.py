@@ -53,3 +53,23 @@ class SaleLineAdmin(admin.ModelAdmin):
 class SalePaymentAdmin(admin.ModelAdmin):
     list_display = ["sale", "payment_method", "amount", "created_at"]
     list_filter  = ["payment_method"]
+
+from .models import SaleReturn, SaleReturnLine
+ 
+@admin.register(SaleReturn)
+class SaleReturnAdmin(admin.ModelAdmin):
+    list_display = [
+        "return_number", "original_sale", "return_type",
+        "status", "total_return_amount", "refund_paid",
+        "fbr_eligible", "created_at"
+    ]
+    list_filter  = ["status", "return_type", "reason", "fbr_eligible", "refund_paid"]
+    search_fields = ["return_number", "original_sale__sale_number"]
+    readonly_fields = ["return_number", "created_at", "completed_at"]
+ 
+@admin.register(SaleReturnLine)
+class SaleReturnLineAdmin(admin.ModelAdmin):
+    list_display = [
+        "sale_return", "product_name",
+        "quantity_returned", "return_line_total", "stock_restored"
+    ]

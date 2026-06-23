@@ -1799,3 +1799,346 @@ class SalePayment(models.Model):
 
     def __str__(self):
         return f"{self.get_payment_method_display()} — Rs. {self.amount} [{self.sale.sale_number}]"
+    
+
+"""
+========================================================
+pos/return_models.py
+Add these to pos/models.py
+ 
+Return flow:
+1. Cashier selects original completed sale
+2. Selects items to return (full or partial)
+3. System creates SaleReturn record
+4. SaleReturnLine rows created for each returned item
+5. Stock incremented for returned items
+6. Credit Note Sale created linked to original
+7. Credit Note submitted to FBR
+8. Cash refund recorded as SaleRefundPayment
+ 
+FBR rules for credit notes (from PRAL manual):
+- Only e-invoices received through DI Integration are eligible
+- Corrections must be within 72 hours of invoice insertion date
+- Invoice number cannot be modified
+- Invoices linked with Annexure-C are not eligible
+- Cannot exceed 10% of last month's sales
+========================================================
+"""
+ 
+from django.core.validators import MinValueValidator
+from django.db import models
+from django.utils import timezone
+from django.utils.translation import gettext_lazy as _
+ 
+ 
+class ReturnStatus(models.TextChoices):
+    PENDING   = "pending",   _("Pending")
+    COMPLETED = "completed", _("Completed")
+    REJECTED  = "rejected",  _("Rejected")
+ 
+ 
+class ReturnReason(models.TextChoices):
+    DEFECTIVE        = "defective",        _("Defective / Damaged Product")
+    WRONG_ITEM       = "wrong_item",       _("Wrong Item Delivered")
+    CUSTOMER_CHANGED = "customer_changed", _("Customer Changed Mind")
+    OVERCHARGED      = "overcharged",      _("Overcharged")
+    EXPIRED          = "expired",          _("Expired Product")
+    OTHER            = "other",            _("Other")
+ 
+ 
+class SaleReturn(models.Model):
+    """
+    One row = one return transaction.
+ 
+    Links back to original Sale.
+    Can be full (all items) or partial (selected items).
+    Always results in a cash refund to customer.
+ 
+    Creates a Credit Note Sale that gets submitted to FBR.
+ 
+    FBR 72-hour rule is checked at creation time.
+    """
+ 
+    # ── Ownership ─────────────────────────────────────────────────────
+    company = models.ForeignKey(
+        "companies.Company",
+        on_delete=models.CASCADE,
+        related_name="returns",
+        verbose_name=_("Company"),
+    )
+ 
+    original_sale = models.ForeignKey(
+        "pos.Sale",
+        on_delete=models.PROTECT,
+        related_name="returns",
+        verbose_name=_("Original Sale"),
+        help_text=_(
+            "The completed sale this return is against. "
+            "Must have a valid FBR invoice number for credit note submission."
+        ),
+    )
+ 
+    # Credit note sale created automatically when return is completed
+    credit_note_sale = models.OneToOneField(
+        "pos.Sale",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="return_credit_note",
+        verbose_name=_("Credit Note Sale"),
+        help_text=_(
+            "Auto-created Credit Note Sale linked to this return. "
+            "Submitted to FBR as a Credit Note invoice."
+        ),
+    )
+ 
+    processed_by = models.ForeignKey(
+        "users.User",
+        on_delete=models.PROTECT,
+        related_name="processed_returns",
+        verbose_name=_("Processed By"),
+    )
+ 
+    # ── Return details ────────────────────────────────────────────────
+    return_number = models.CharField(
+        max_length=50,
+        unique=True,
+        verbose_name=_("Return Number"),
+        help_text=_("Auto-generated. Format: RET-YYYY-NNNNNN"),
+    )
+ 
+    return_type = models.CharField(
+        max_length=10,
+        choices=[("full", _("Full Return")), ("partial", _("Partial Return"))],
+        verbose_name=_("Return Type"),
+    )
+ 
+    reason = models.CharField(
+        max_length=20,
+        choices=ReturnReason.choices,
+        default=ReturnReason.OTHER,
+        verbose_name=_("Return Reason"),
+    )
+ 
+    reason_notes = models.TextField(
+        blank=True,
+        verbose_name=_("Additional Notes"),
+        help_text=_("Required when reason is 'Other'."),
+    )
+ 
+    status = models.CharField(
+        max_length=10,
+        choices=ReturnStatus.choices,
+        default=ReturnStatus.PENDING,
+        verbose_name=_("Status"),
+    )
+ 
+    # ── Financial totals ──────────────────────────────────────────────
+    total_return_amount = models.DecimalField(
+        max_digits=14,
+        decimal_places=2,
+        default=0,
+        verbose_name=_("Total Return Amount"),
+        help_text=_("Sum of all returned line totals including tax."),
+    )
+ 
+    total_return_tax = models.DecimalField(
+        max_digits=14,
+        decimal_places=2,
+        default=0,
+        verbose_name=_("Total Tax Returned"),
+    )
+ 
+    # ── Refund ────────────────────────────────────────────────────────
+    refund_amount = models.DecimalField(
+        max_digits=14,
+        decimal_places=2,
+        default=0,
+        verbose_name=_("Refund Amount"),
+        help_text=_("Cash refunded to customer. Equals total_return_amount."),
+    )
+ 
+    refund_paid = models.BooleanField(
+        default=False,
+        verbose_name=_("Refund Paid"),
+        help_text=_("True when cash has been physically returned to customer."),
+    )
+ 
+    refund_paid_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name=_("Refund Paid At"),
+    )
+ 
+    # ── FBR 72-hour eligibility check ────────────────────────────────
+    fbr_eligible = models.BooleanField(
+        default=True,
+        verbose_name=_("FBR Credit Note Eligible"),
+        help_text=_(
+            "False if original invoice is older than 72 hours "
+            "or has been reported in a submitted return. "
+            "If False, return is processed internally but no credit note sent to FBR."
+        ),
+    )
+ 
+    fbr_eligibility_reason = models.CharField(
+        max_length=255,
+        blank=True,
+        verbose_name=_("FBR Ineligibility Reason"),
+        help_text=_("Reason why credit note cannot be submitted to FBR."),
+    )
+ 
+    # ── Timestamps ────────────────────────────────────────────────────
+    created_at   = models.DateTimeField(auto_now_add=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    updated_at   = models.DateTimeField(auto_now=True)
+ 
+    class Meta:
+        verbose_name        = _("Sale Return")
+        verbose_name_plural = _("Sale Returns")
+        ordering            = ["-created_at"]
+        indexes = [
+            models.Index(fields=["company", "status"],    name="return_company_status_idx"),
+            models.Index(fields=["original_sale"],        name="return_original_sale_idx"),
+        ]
+ 
+    def __str__(self):
+        return f"{self.return_number} → {self.original_sale.sale_number}"
+ 
+    def save(self, *args, **kwargs):
+        if not self.return_number:
+            self.return_number = self._generate_return_number()
+        super().save(*args, **kwargs)
+ 
+    def _generate_return_number(self) -> str:
+        year  = timezone.now().year
+        count = SaleReturn.objects.filter(company=self.company).count() + 1
+        return f"RET-{year}-{count:06d}"
+ 
+    def check_fbr_eligibility(self):
+        """
+        Checks FBR 72-hour rule and other eligibility conditions.
+        Sets fbr_eligible and fbr_eligibility_reason.
+        """
+        original = self.original_sale
+ 
+        # Must have FBR invoice number
+        if not original.fbr_invoice_number:
+            self.fbr_eligible          = False
+            self.fbr_eligibility_reason = (
+                "Original invoice was not submitted to FBR. "
+                "Credit note cannot be issued."
+            )
+            return
+ 
+        # 72-hour rule
+        if original.completed_at:
+            hours_elapsed = (
+                timezone.now() - original.completed_at
+            ).total_seconds() / 3600
+ 
+            if hours_elapsed > 72:
+                self.fbr_eligible           = False
+                self.fbr_eligibility_reason = (
+                    f"Original invoice is {hours_elapsed:.0f} hours old. "
+                    f"FBR only allows corrections within 72 hours of invoice date."
+                )
+                return
+ 
+        self.fbr_eligible           = True
+        self.fbr_eligibility_reason = ""
+ 
+ 
+class SaleReturnLine(models.Model):
+    """
+    One row = one product line being returned.
+    Linked to both SaleReturn and original SaleLine.
+    """
+ 
+    sale_return = models.ForeignKey(
+        SaleReturn,
+        on_delete=models.CASCADE,
+        related_name="lines",
+        verbose_name=_("Sale Return"),
+    )
+ 
+    original_line = models.ForeignKey(
+        "pos.SaleLine",
+        on_delete=models.PROTECT,
+        related_name="return_lines",
+        verbose_name=_("Original Sale Line"),
+    )
+ 
+    product_name = models.CharField(
+        max_length=255,
+        verbose_name=_("Product Name (snapshot)"),
+    )
+ 
+    quantity_returned = models.DecimalField(
+        max_digits=12,
+        decimal_places=3,
+        validators=[MinValueValidator(0.001)],
+        verbose_name=_("Quantity Returned"),
+        help_text=_("Cannot exceed original line quantity."),
+    )
+ 
+    unit_price = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        verbose_name=_("Unit Price"),
+        help_text=_("Copied from original line."),
+    )
+ 
+    tax_rate_percent = models.CharField(
+        max_length=10,
+        verbose_name=_("Tax Rate"),
+    )
+ 
+    return_value_excl_tax = models.DecimalField(
+        max_digits=14,
+        decimal_places=2,
+        default=0,
+        verbose_name=_("Return Value excl. Tax"),
+    )
+ 
+    return_tax = models.DecimalField(
+        max_digits=14,
+        decimal_places=2,
+        default=0,
+        verbose_name=_("Return Tax"),
+    )
+ 
+    return_line_total = models.DecimalField(
+        max_digits=14,
+        decimal_places=2,
+        default=0,
+        verbose_name=_("Return Line Total"),
+    )
+ 
+    # Track if stock was incremented back
+    stock_restored = models.BooleanField(
+        default=False,
+        verbose_name=_("Stock Restored"),
+    )
+ 
+    class Meta:
+        verbose_name        = _("Sale Return Line")
+        verbose_name_plural = _("Sale Return Lines")
+ 
+    def __str__(self):
+        return f"{self.product_name} × {self.quantity_returned}"
+ 
+    def save(self, *args, **kwargs):
+        self._compute_totals()
+        super().save(*args, **kwargs)
+ 
+    def _compute_totals(self):
+        qty      = float(self.quantity_returned)
+        price    = float(self.unit_price)
+        tax_rate = float(self.tax_rate_percent.replace("%", "")) / 100
+ 
+        self.return_value_excl_tax = round(price * qty, 2)
+        self.return_tax            = round(self.return_value_excl_tax * tax_rate, 2)
+        self.return_line_total     = round(
+            float(self.return_value_excl_tax) + float(self.return_tax), 2
+        )
