@@ -12,5 +12,14 @@ jobs :
             - run : ls -la
             - run : python --version
             - run : echo "completed the steps "
+            - uses : action/setup-python@v5
+              with:
+                python-version : "3.12"
+            - name : install dependencies
+              run : pip install -r requirements.txt
+            - name : check python 
+              run : python manage.py check
+
+            
      
 
