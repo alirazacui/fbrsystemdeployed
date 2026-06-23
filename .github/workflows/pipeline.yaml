@@ -12,7 +12,7 @@ jobs :
             - run : ls -la
             - run : python --version
             - run : echo "completed the steps "
-            - uses : action/setup-python@v5
+            - uses : actions/setup-python@v5
               with:
                 python-version : "3.12"
             - name : install dependencies
