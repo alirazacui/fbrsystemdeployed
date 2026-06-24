@@ -92,6 +92,18 @@ class ProductViewSet(
         if self.action in ["create", "update", "partial_update", "adjust_stock"]:
             return [IsOwnerOrAdmin()]
         return [IsActiveUser()]
+    def perform_create(self, serializer):
+        """
+        Called by CreateModelMixin.create() before saving.
+        Check subscription product limit before allowing creation.
+        """
+        sub = getattr(self.request, "subscription", None)
+        if sub:
+            can_add, reason = sub.check_product_limit()
+            if not can_add:
+                from rest_framework.exceptions import PermissionDenied
+                raise PermissionDenied(detail=reason)
+        serializer.save()
  
     # ── Custom actions ─────────────────────────────────────────────────
  
@@ -224,6 +236,15 @@ class CustomerViewSet(
                            "activate", "deactivate"]:
             return [IsOwnerOrAdmin()]
         return [IsActiveUser()]
+    def perform_create(self, serializer):
+        """Check subscription customer limit before creating customer."""
+        sub = getattr(self.request, "subscription", None)
+        if sub:
+            can_add, reason = sub.check_customer_limit()
+            if not can_add:
+                from rest_framework.exceptions import PermissionDenied
+                raise PermissionDenied(detail=reason)
+        serializer.save()
  
     # ── Custom actions ─────────────────────────────────────────────────
  
@@ -548,6 +569,12 @@ class SaleViewSet(GenericViewSet):
             data={}, context={"request": request, "sale": sale}
         )
         serializer.is_valid(raise_exception=True)
+        sub = getattr(request, "subscription", None)
+        if sub:
+            can_add, reason = sub.check_sales_limit()
+            if not can_add:
+                from rest_framework.exceptions import PermissionDenied
+                raise PermissionDenied(detail=reason)
  
         with transaction.atomic():
             # Complete the sale

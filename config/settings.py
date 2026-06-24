@@ -53,6 +53,7 @@ INSTALLED_APPS = [
     "digital_invoicing",
     "django_celery_beat",
     "reports",
+    "subscriptions",
 
     
 ]
@@ -60,6 +61,7 @@ INSTALLED_APPS = [
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
+    "subscriptions.middleware.SubscriptionMiddleware",
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
@@ -217,3 +219,13 @@ STORAGES = {
  
 MEDIA_URL  = f"https://{AWS_S3_CUSTOM_DOMAIN}/media/"
 MEDIA_ROOT = ""    # not needed when using S3
+
+
+EMAIL_BACKEND      = "django.core.mail.backends.smtp.EmailBackend"
+EMAIL_HOST         = config("EMAIL_HOST", default="smtp.gmail.com")
+EMAIL_PORT         = config("EMAIL_PORT", default=587, cast=int)
+EMAIL_USE_TLS      = True
+EMAIL_HOST_USER    = config("EMAIL_HOST_USER")
+EMAIL_HOST_PASSWORD = config("EMAIL_HOST_PASSWORD")
+DEFAULT_FROM_EMAIL = config("DEFAULT_FROM_EMAIL", default="noreply@posplatform.pk")
+

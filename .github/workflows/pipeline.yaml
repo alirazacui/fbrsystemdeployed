@@ -20,6 +20,11 @@ jobs :
             - name : check python 
               run : python manage.py check
 
+
+        
+
+
+
             
      
 

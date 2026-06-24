@@ -147,6 +147,15 @@ class CompanyUserViewSet(
         if self.action == "list":
             return UserListSerializer
         return UserDetailSerializer
+    def perform_create(self, serializer):
+        """Check subscription user limit before creating staff user."""
+        sub = getattr(self.request, "subscription", None)
+        if sub:
+            can_add, reason = sub.check_user_limit()
+            if not can_add:
+                from rest_framework.exceptions import PermissionDenied
+                raise PermissionDenied(detail=reason)
+        serializer.save()
  
     @action(detail=True, methods=["patch"], url_path="status")
     def status(self, request, pk=None):

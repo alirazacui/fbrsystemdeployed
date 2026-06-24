@@ -46,4 +46,11 @@ CELERY_BEAT_SCHEDULE = {
         "task":     "digital_invoicing.retry_failed_submissions",
         "schedule": crontab(minute="*/15"),
     },
+
+    "check-expiring-subscriptions": {
+       "task":     "subscriptions.check_expiring_subscriptions",
+       "schedule": crontab(hour=9, minute=0),  # runs daily at 9am
+   },
+
+
 }
