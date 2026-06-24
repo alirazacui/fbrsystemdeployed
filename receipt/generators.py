@@ -121,22 +121,22 @@ class ThermalReceiptGenerator:
         self.buffer  = io.BytesIO()
  
     def generate(self, force_regenerate: bool = False) -> str:
+    
+        if self.sale.receipt_thermal_url and not force_regenerate:
+            return self.sale.receipt_thermal_url
 
-     if self.sale.receipt_thermal_url and not force_regenerate:
-        return self.sale.receipt_thermal_url
+        self._build_pdf()
+        url = self._save_to_s3("thermal")
 
-     self._build_pdf()
-     url = self._save_to_s3("thermal")
-
-     from django.utils import timezone
-     self.sale.receipt_thermal_url  = url
-     self.sale.receipt_generated_at = timezone.now()
-     self.sale.save(update_fields=[
-        "receipt_thermal_url",
-        "receipt_generated_at",
-        "updated_at",
-     ])
-     return url
+        from django.utils import timezone
+        self.sale.receipt_thermal_url  = url
+        self.sale.receipt_generated_at = timezone.now()
+        self.sale.save(update_fields=[
+            "receipt_thermal_url",
+            "receipt_generated_at",
+            "updated_at",
+            ])
+        return url
  
     def _build_pdf(self):
         """Builds the complete thermal receipt using reportlab canvas."""

@@ -1337,6 +1337,32 @@ class Sale(models.Model):
             "Version 2.0 (25×25), 1.0 × 1.0 inch as per PRAL spec."
         ),
     )
+    # ── Receipt URLs (stored after first generation) ──────────────────
+    receipt_thermal_url = models.URLField(
+        blank=True,
+        verbose_name=_("Thermal Receipt URL"),
+        help_text=_(
+            "S3 URL of generated 80mm thermal receipt PDF. "
+            "Auto-populated on first receipt request. "
+            "Empty until first generated."
+        ),
+    )
+ 
+    receipt_a4_url = models.URLField(
+        blank=True,
+        verbose_name=_("A4 Invoice URL"),
+        help_text=_(
+            "S3 URL of generated A4 invoice PDF. "
+            "Auto-populated on first invoice request."
+        ),
+    )
+ 
+    receipt_generated_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name=_("Receipt Generated At"),
+        help_text=_("Timestamp of last receipt generation."),
+    )
 
     # ------------------------------------------------------------------
     # Notes & reference
