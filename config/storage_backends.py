@@ -124,4 +124,17 @@ def invoice_pdf_upload_path(instance, filename):
         f"{instance.sale_number}.pdf"
     )
 
+def payment_qr_upload_path(instance, filename):
+    """
+    Payment QR upload path.
+    S3 path: company_{company_id}/payment_qrs/{filename}
+    """
+    import os
+    ext = os.path.splitext(filename)[1].lower()
+    # instance is CompanyPaymentMethodSettings, so it has a company_id
+    # We will use original filename but sanitize or just use uuid
+    import uuid
+    new_name = f"{uuid.uuid4().hex}{ext}"
+    return f"company_{instance.company_id}/payment_qrs/{new_name}"
+
 

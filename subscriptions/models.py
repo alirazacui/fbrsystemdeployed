@@ -40,6 +40,14 @@ class SubscriptionPlan(models.Model):
     """
  
     # ── Identity ──────────────────────────────────────────────────────
+    code = models.CharField(
+        max_length=50,
+        unique=True,
+        null=True, blank=True,
+        verbose_name=_("Plan Code"),
+        help_text=_("Stable identifier (e.g. 'starter', 'pro', 'enterprise')."),
+    )
+
     name = models.CharField(
         max_length=100,
         unique=True,
@@ -78,6 +86,15 @@ class SubscriptionPlan(models.Model):
         default=0,
         validators=[MinValueValidator(0)],
         verbose_name=_("Price Per Month (Rs.)"),
+        help_text=_("Set to 0 for free/trial plans."),
+    )
+
+    price_per_year = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=0,
+        validators=[MinValueValidator(0)],
+        verbose_name=_("Price Per Year (Rs.)"),
         help_text=_("Set to 0 for free/trial plans."),
     )
  
@@ -142,6 +159,13 @@ class SubscriptionPlan(models.Model):
     includes_returns             = models.BooleanField(default=True,  verbose_name=_("Includes Returns"))
     includes_cheque_bank         = models.BooleanField(default=False, verbose_name=_("Includes Cheque & Bank Transfer"))
  
+    # ── Display ───────────────────────────────────────────────────────
+    sort_order = models.PositiveIntegerField(
+        default=0,
+        verbose_name=_("Sort Order"),
+        help_text=_("Lower numbers appear first in lists."),
+    )
+ 
     # ── Timestamps ────────────────────────────────────────────────────
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -149,7 +173,7 @@ class SubscriptionPlan(models.Model):
     class Meta:
         verbose_name        = _("Subscription Plan")
         verbose_name_plural = _("Subscription Plans")
-        ordering            = ["price_per_month"]
+        ordering            = ["sort_order", "price_per_month"]
  
     def __str__(self):
         price = f"Rs. {self.price_per_month}/month" if self.price_per_month > 0 else "Free"

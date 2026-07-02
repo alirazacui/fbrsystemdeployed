@@ -10,14 +10,34 @@ from rest_framework import mixins, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.viewsets import GenericViewSet
+from rest_framework.permissions import BasePermission
  
-from common.permissions import IsAdmin, IsAdminOrAdminStaff
+from common.permissions import IsAdmin, IsAdminOrAdminStaff, IsOwnerOrAdmin
 from .models import Company
 from .serializers import (
     CompanyDetailSerializer,
     CompanyListSerializer,
     CompanyModulesSerializer,
+    CompanyPaymentMethodSettingsSerializer,
 )
+
+
+class IsCompanyOwnerOrAdmin(BasePermission):
+    """
+    Checks that the user is the owner of the specific company object being accessed,
+    or is a platform admin.
+    """
+    def has_permission(self, request, view):
+        return request.user.is_authenticated
+
+    def has_object_permission(self, request, view, obj):
+        if request.user.is_platform_admin:
+            return True
+        return (
+            request.user.role == "owner"
+            and request.user.status == "active"
+            and obj.id == request.user.company_id
+        )
  
  
 class CompanyViewSet(
@@ -29,8 +49,8 @@ class CompanyViewSet(
     # No DestroyModelMixin — companies are never hard-deleted
 ):
     """
-    Admin-only. Manages all client company records.
- 
+    Admin-only for list/create, Owner or Admin for retrieve/update.
+  
     list    GET  /api/companies/
     create  POST /api/companies/
     retrieve GET /api/companies/{id}/
@@ -41,7 +61,11 @@ class CompanyViewSet(
     deactivate POST /api/companies/{id}/deactivate/
     """
     queryset         = Company.objects.all().order_by("-created_at")
-    permission_classes = [IsAdmin]
+ 
+    def get_permissions(self):
+        if self.action in ["retrieve", "update", "partial_update"]:
+            return [IsCompanyOwnerOrAdmin()]
+        return [IsAdmin()]
  
     def get_serializer_class(self):
         if self.action == "list":
@@ -76,3 +100,22 @@ class CompanyViewSet(
         company.is_active = False
         company.save(update_fields=["is_active", "updated_at"])
         return Response({"detail": f"'{company.business_name}' has been deactivated."})
+
+    @action(detail=True, methods=["get", "patch"], url_path="payment-settings")
+    def payment_settings(self, request, pk=None):
+        """GET or PATCH /api/companies/{id}/payment-settings/"""
+        company = self.get_object()
+        from pos.models import CompanyPaymentMethodSettings
+        settings_obj, created = CompanyPaymentMethodSettings.objects.get_or_create(company=company)
+        
+        if request.method == "GET":
+            serializer = CompanyPaymentMethodSettingsSerializer(settings_obj, context={"request": request})
+            return Response(serializer.data)
+            
+        elif request.method == "PATCH":
+            serializer = CompanyPaymentMethodSettingsSerializer(
+                settings_obj, data=request.data, partial=True, context={"request": request}
+            )
+            serializer.is_valid(raise_exception=True)
+            serializer.save()
+            return Response(serializer.data)

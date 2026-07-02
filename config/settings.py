@@ -43,6 +43,7 @@ INSTALLED_APPS = [
 
     # Third-party
     "rest_framework",
+    "corsheaders",
 
     # Local apps
     "common",
@@ -54,11 +55,13 @@ INSTALLED_APPS = [
     "django_celery_beat",
     "reports",
     "subscriptions",
+    "receipt",
 
     
 ]
 
 MIDDLEWARE = [
+    'corsheaders.middleware.CorsMiddleware',  # Must be first
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     "subscriptions.middleware.SubscriptionMiddleware",
@@ -68,6 +71,16 @@ MIDDLEWARE = [
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
+
+# ── CORS ─────────────────────────────────────────────────────
+# Allow the Vue dev server to call the Django API
+CORS_ALLOWED_ORIGINS = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    'http://localhost:3000',
+    'http://127.0.0.1:3000',
+]
+CORS_ALLOW_CREDENTIALS = True
 
 ROOT_URLCONF = 'config.urls'
 

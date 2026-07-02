@@ -389,11 +389,12 @@ class A4InvoiceGenerator:
     └──────────────────────────────────────────┘
     """
  
-    # Brand colors
-    PRIMARY_COLOR   = colors.HexColor("#1a56db")   # blue
-    SECONDARY_COLOR = colors.HexColor("#f3f4f6")   # light gray
-    TEXT_COLOR      = colors.HexColor("#111827")   # near black
-    MUTED_COLOR     = colors.HexColor("#6b7280")   # gray
+    # Brand colors - Matching the reference invoice style
+    PRIMARY_COLOR   = colors.HexColor("#0f3d64")   # Dark blue for company name
+    SECONDARY_COLOR = colors.HexColor("#f8f9fa")   # Light gray
+    TEXT_COLOR      = colors.HexColor("#333333")   # Dark gray/black
+    MUTED_COLOR     = colors.HexColor("#888888")   # Gray
+    ACCENT_COLOR    = colors.HexColor("#00a651")   # Green for FBR and borders
  
     def __init__(self, sale):
         self.sale    = sale
@@ -427,74 +428,114 @@ class A4InvoiceGenerator:
         title_style = ParagraphStyle(
             "InvoiceTitle",
             parent    = styles["Normal"],
-            fontSize  = 22,
+            fontSize  = 20,
+            leading   = 24,
             fontName  = "Helvetica-Bold",
             textColor = self.PRIMARY_COLOR,
-            alignment = TA_RIGHT,
+            spaceAfter = 8,
         )
         header_style = ParagraphStyle(
             "HeaderStyle",
             parent    = styles["Normal"],
-            fontSize  = 9,
+            fontSize  = 8,
             textColor = self.TEXT_COLOR,
-            leading   = 14,
+            leading   = 12,
         )
         label_style = ParagraphStyle(
             "LabelStyle",
             parent    = styles["Normal"],
-            fontSize  = 8,
+            fontSize  = 7,
             textColor = self.MUTED_COLOR,
+            textTransform = "uppercase",
         )
         section_style = ParagraphStyle(
             "SectionStyle",
             parent    = styles["Normal"],
-            fontSize  = 9,
+            fontSize  = 8,
             fontName  = "Helvetica-Bold",
-            textColor = self.PRIMARY_COLOR,
-            spaceBefore = 6,
+            textColor = self.ACCENT_COLOR,
+            spaceBefore = 4,
+            spaceAfter = 4,
+            textTransform = "uppercase",
         )
  
-        # ── HEADER ROW: Company info + Invoice title ───────────────────
+        # ── TOP GREEN BAR ──────────────────────────────────────────────
+        story.append(HRFlowable(
+            width="100%", thickness=4,
+            color=self.ACCENT_COLOR, spaceAfter=8 * mm, spaceBefore=0
+        ))
+
+        # ── HEADER ROW: Company info + FBR Info ───────────────────
         completed = self.sale.completed_at or timezone.now()
  
+        # Top Left Info
         company_info = [
-            Paragraph(
-                f"<b>{self.company.business_name}</b>",
-                ParagraphStyle("co", fontSize=13, fontName="Helvetica-Bold",
-                               textColor=self.TEXT_COLOR)
-            ),
-            Paragraph(self.company.address or "", header_style),
-            Paragraph(f"Phone: {self.company.phone}", header_style) if self.company.phone else Spacer(1, 1),
-            Paragraph(f"NTN: {self.company.ntn}", header_style),
+            Paragraph(f"<b>{self.company.business_name.upper()}</b>", title_style),
+            Paragraph(f"NTN {self.company.ntn}", label_style),
+            Spacer(1, 6 * mm)
         ]
-        if self.company.strn:
-            company_info.append(Paragraph(f"STRN: {self.company.strn}", header_style))
+        
+        info_data = [
+            [Paragraph("INVOICE NUMBER", label_style), Paragraph(f"<b>{self.sale.sale_number}</b>", header_style)],
+            [Paragraph("INVOICE DATE", label_style), Paragraph(completed.strftime('%d %b %Y'), header_style)],
+        ]
+        
+        if self.sale.fbr_invoice_number:
+            info_data.append([
+                Paragraph("FBR INVOICE", label_style),
+                Paragraph(f"<b>{self.sale.fbr_invoice_number}</b>", ParagraphStyle("FBRInv", parent=header_style, textColor=self.ACCENT_COLOR))
+            ])
+            status_badge = Paragraph(
+                "<b>FBR VALIDATED</b>", 
+                ParagraphStyle("Badge", fontSize=7, textColor=self.ACCENT_COLOR, alignment=TA_CENTER)
+            )
+            # Create a simple badge-like appearance using a Table
+            badge_table = Table([[status_badge]], colWidths=[30 * mm], rowHeights=[6 * mm])
+            badge_table.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#e6f6eb")),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+                ("ROUNDEDCORNERS", (0, 0), (-1, -1), [3, 3, 3, 3])
+            ]))
+            info_data.append([Paragraph("STATUS", label_style), badge_table])
+        
+        info_table = Table(info_data, colWidths=[width * 0.15, width * 0.35])
+        info_table.setStyle(TableStyle([
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 0),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ]))
+        company_info.append(info_table)
  
-        invoice_info = [
-            Paragraph(self.sale.sale_type.upper(), title_style),
-            Spacer(1, 4),
-            Paragraph(
-                f"<b>Invoice #:</b> {self.sale.sale_number}",
-                ParagraphStyle("inv", fontSize=9, alignment=TA_RIGHT)
-            ),
-            Paragraph(
-                f"<b>Date:</b> {completed.strftime('%d %B %Y')}",
-                ParagraphStyle("inv", fontSize=9, alignment=TA_RIGHT)
-            ),
-            Paragraph(
-                f"<b>Time:</b> {completed.strftime('%I:%M %p')}",
-                ParagraphStyle("inv", fontSize=9, alignment=TA_RIGHT)
-            ),
-            Paragraph(
-                f"<b>Status:</b> PAID",
-                ParagraphStyle("inv", fontSize=9, alignment=TA_RIGHT,
-                               textColor=colors.green)
-            ),
-        ]
+        # Top Right Info (FBR Logo and QR)
+        fbr_right = []
+        if self.sale.fbr_qr_code:
+            qr_buffer = _generate_qr_image(self.sale.fbr_qr_code)
+            qr_img = Image(qr_buffer, width=28 * mm, height=28 * mm)
+            
+            # Use the actual FBR logo image from the project folder
+            try:
+                fbr_logo = Image("/home/ali-raza/fbr_pos_project/fbr_digital_invoice.png", width=34 * mm, height=26 * mm)
+            except Exception:
+                # Fallback if image isn't found
+                fbr_logo = Paragraph("<b>FBR LOGO MISSING</b>", ParagraphStyle("F1", fontSize=10, textColor=colors.red))
+            
+            qr_table_data = [
+                [fbr_logo, qr_img],
+                [Paragraph("FBR DIGITAL INVOICING", ParagraphStyle("q1", fontSize=6, textColor=self.MUTED_COLOR, alignment=TA_CENTER)),
+                 Paragraph("SCAN TO VERIFY", ParagraphStyle("q2", fontSize=6, textColor=self.MUTED_COLOR, alignment=TA_CENTER))]
+            ]
+            qr_table = Table(qr_table_data, colWidths=[38 * mm, 32 * mm])
+            qr_table.setStyle(TableStyle([
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+            ]))
+            fbr_right.append(qr_table)
  
         header_table = Table(
-            [[company_info, invoice_info]],
-            colWidths=[width * 0.55, width * 0.45],
+            [[company_info, fbr_right]],
+            colWidths=[width * 0.60, width * 0.40],
         )
         header_table.setStyle(TableStyle([
             ("VALIGN",     (0, 0), (-1, -1), "TOP"),
@@ -504,125 +545,62 @@ class A4InvoiceGenerator:
         story.append(header_table)
         story.append(Spacer(1, 4 * mm))
  
-        # ── Blue divider ──────────────────────────────────────────────
-        story.append(HRFlowable(
-            width="100%", thickness=2,
-            color=self.PRIMARY_COLOR, spaceAfter=4 * mm
-        ))
- 
-        # ── BILL TO section ───────────────────────────────────────────
-        customer     = self.sale.customer
-        cashier_name = (
-            self.sale.cashier.get_full_name() or self.sale.cashier.email
-        )
- 
-        bill_left = [
-            Paragraph("BILL TO", section_style),
-            Paragraph(f"<b>{customer.name}</b>", header_style),
-            Paragraph(f"NTN/CNIC: {customer.ntn_cnic or 'N/A'}", header_style),
-            Paragraph(
-                f"Type: {customer.get_registration_type_display()}",
-                header_style
-            ),
-            Paragraph(f"Address: {customer.address or 'N/A'}", header_style),
-        ]
- 
-        bill_right = [
-            Paragraph("SERVED BY", section_style),
-            Paragraph(f"<b>{cashier_name}</b>", header_style),
-            Paragraph(
-                f"Cashier: {self.sale.cashier.email}",
-                header_style
-            ),
-        ]
-        if self.sale.cash_session:
-            bill_right.append(
-                Paragraph(
-                    f"Session: #{self.sale.cash_session.pk}",
-                    header_style
-                )
-            )
- 
-        bill_table = Table(
-            [[bill_left, bill_right]],
-            colWidths=[width * 0.6, width * 0.4],
-        )
-        bill_table.setStyle(TableStyle([
-            ("VALIGN",      (0, 0), (-1, -1), "TOP"),
-            ("BACKGROUND",  (0, 0), (-1, -1), self.SECONDARY_COLOR),
-            ("LEFTPADDING", (0, 0), (-1, -1), 8),
-            ("RIGHTPADDING",(0, 0), (-1, -1), 8),
-            ("TOPPADDING",  (0, 0), (-1, -1), 6),
-            ("BOTTOMPADDING",(0, 0), (-1, -1), 6),
-            ("ROUNDEDCORNERS", (0, 0), (-1, -1), [4, 4, 4, 4]),
-        ]))
-        story.append(bill_table)
-        story.append(Spacer(1, 4 * mm))
- 
-        # ── LINE ITEMS TABLE ──────────────────────────────────────────
-        col_style = ParagraphStyle(
-            "ColHead", fontSize=8, fontName="Helvetica-Bold",
-            textColor=colors.white, alignment=TA_CENTER
-        )
-        cell_style  = ParagraphStyle("Cell", fontSize=8, alignment=TA_LEFT)
-        right_style = ParagraphStyle("CellR", fontSize=8, alignment=TA_RIGHT)
- 
+        # ── Light gray divider ──────────────────────────────────────────────
+        col_style   = ParagraphStyle("ColHead", fontSize=8, fontName="Helvetica-Bold", textColor=self.MUTED_COLOR, alignment=TA_CENTER)
+        cell_style  = ParagraphStyle("Cell", fontSize=9, alignment=TA_LEFT, textColor=self.TEXT_COLOR)
+        right_style = ParagraphStyle("CellR", fontSize=9, alignment=TA_RIGHT, textColor=self.TEXT_COLOR)
+
         items_data = [[
             Paragraph("#",              col_style),
-            Paragraph("Description",   col_style),
             Paragraph("HS Code",       col_style),
+            Paragraph("Item",          col_style),
             Paragraph("Qty",           col_style),
-            Paragraph("Unit Price",    col_style),
-            Paragraph("Tax Rate",      col_style),
-            Paragraph("Tax Amount",    col_style),
-            Paragraph("Total",         col_style),
+            Paragraph("Unit",          col_style),
+            Paragraph("Rate",          col_style),
+            Paragraph("Tax %",         col_style),
+            Paragraph("Tax",           col_style),
+            Paragraph("Amount",        col_style),
         ]]
- 
-        for i, line in enumerate(self.sale.lines.all(), 1):
+
+        for idx, line in enumerate(self.sale.lines.all(), start=1):
+            prod = line.product
             items_data.append([
-                Paragraph(str(i),                         cell_style),
-                Paragraph(line.product_name[:35],         cell_style),
-                Paragraph(line.hs_code or "—",           cell_style),
-                Paragraph(str(line.quantity),             right_style),
-                Paragraph(f"Rs. {line.unit_price:.2f}",  right_style),
-                Paragraph(line.tax_rate_percent,          right_style),
-                Paragraph(
-                    f"Rs. {line.sales_tax_applicable:.2f}", right_style
-                ),
-                Paragraph(f"Rs. {line.line_total:.2f}",  right_style),
+                Paragraph(f"{idx:02d}", cell_style),
+                Paragraph(prod.hs_code or "—", cell_style),
+                Paragraph(f"<b>{prod.name}</b>", cell_style),
+                Paragraph(f"{line.quantity:g}", right_style),
+                Paragraph(prod.unit_of_measure or "—", cell_style),
+                Paragraph(f"{line.unit_price:.2f}", right_style),
+                Paragraph(line.tax_rate_percent or "—", right_style),
+                Paragraph(f"{line.sales_tax_applicable:.2f}", right_style),
+                Paragraph(f"<b>{line.line_total:.2f}</b>", right_style),
             ])
- 
+
         items_table = Table(
             items_data,
             colWidths=[
-                width * 0.04,   # #
-                width * 0.25,   # Description
-                width * 0.10,   # HS Code
+                width * 0.05,   # #
+                width * 0.12,   # HS Code
+                width * 0.25,   # Item
                 width * 0.07,   # Qty
-                width * 0.12,   # Unit Price
-                width * 0.08,   # Tax Rate
-                width * 0.12,   # Tax Amount
-                width * 0.12,   # Total
+                width * 0.10,   # Unit
+                width * 0.11,   # Rate
+                width * 0.07,   # Tax %
+                width * 0.11,   # Tax
+                width * 0.12,   # Amount
             ],
             repeatRows=1,
         )
         items_table.setStyle(TableStyle([
             # Header row
-            ("BACKGROUND",    (0, 0), (-1, 0),  self.PRIMARY_COLOR),
-            ("TEXTCOLOR",     (0, 0), (-1, 0),  colors.white),
+            ("TEXTCOLOR",     (0, 0), (-1, 0),  self.MUTED_COLOR),
             ("FONTNAME",      (0, 0), (-1, 0),  "Helvetica-Bold"),
             ("FONTSIZE",      (0, 0), (-1, 0),  8),
-            ("TOPPADDING",    (0, 0), (-1, 0),  6),
-            ("BOTTOMPADDING", (0, 0), (-1, 0),  6),
+            ("TOPPADDING",    (0, 0), (-1, 0),  8),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
             # Data rows
-            ("FONTSIZE",      (0, 1), (-1, -1), 8),
-            ("TOPPADDING",    (0, 1), (-1, -1), 4),
-            ("BOTTOMPADDING", (0, 1), (-1, -1), 4),
-            ("ROWBACKGROUNDS",(0, 1), (-1, -1),
-             [colors.white, self.SECONDARY_COLOR]),
-            # Grid
-            ("GRID",          (0, 0), (-1, -1), 0.3, colors.HexColor("#e5e7eb")),
-            ("LINEBELOW",     (0, 0), (-1, 0),  1,   self.PRIMARY_COLOR),
+            ("FONTSIZE",      (0, 1), (-1, -1), 9),
+            ("TEXTCOLOR",     (0, 1), (-1, -1), self.TEXT_COLOR),
             ("VALIGN",        (0, 0), (-1, -1), "MIDDLE"),
         ]))
         story.append(items_table)
@@ -637,7 +615,7 @@ class A4InvoiceGenerator:
                 textColor=color or self.TEXT_COLOR,
             )
             val_style = ParagraphStyle(
-                "TV", fontSize=9,
+                "TV", fontSize=10,
                 fontName="Helvetica-Bold" if bold else "Helvetica",
                 alignment=TA_RIGHT,
                 textColor=color or self.TEXT_COLOR,
@@ -649,180 +627,69 @@ class A4InvoiceGenerator:
                 Paragraph("", styles["Normal"]),
                 Paragraph("", styles["Normal"]),
                 Paragraph("", styles["Normal"]),
+                Paragraph("", styles["Normal"]),
                 Paragraph(label, lbl_style),
                 Paragraph(value, val_style),
             ]
  
         totals_data = [
-            total_row("Subtotal:",  f"Rs. {self.sale.subtotal:.2f}"),
+            total_row("Subtotal",  f"{self.sale.subtotal:.2f}"),
         ]
         if float(self.sale.total_discount) > 0:
-            totals_data.append(
-                total_row("Discount:",  f"- Rs. {self.sale.total_discount:.2f}")
-            )
-        totals_data.append(
-            total_row("Sales Tax:", f"Rs. {self.sale.total_tax:.2f}")
-        )
+            totals_data.append(total_row("Discount",  f"-{self.sale.total_discount:.2f}"))
+        totals_data.append(total_row("Sales Tax", f"{self.sale.total_tax:.2f}"))
         if float(self.sale.total_fed) > 0:
-            totals_data.append(
-                total_row("FED Payable:", f"Rs. {self.sale.total_fed:.2f}")
-            )
+            totals_data.append(total_row("FED Payable", f"{self.sale.total_fed:.2f}"))
+        
+        # Add grand total row
         totals_data.append(
             total_row(
-                "TOTAL AMOUNT:",
+                "GRAND TOTAL",
                 f"Rs. {self.sale.total_amount:.2f}",
                 bold=True,
-                color=self.PRIMARY_COLOR,
+                color=self.ACCENT_COLOR,
             )
         )
+        totals_data.append(total_row("Paid", f"{self.sale.amount_paid:.2f}"))
+        balance = max(0, float(self.sale.total_amount) - float(self.sale.amount_paid))
+        totals_data.append(total_row("Balance", f"{balance:.2f}"))
  
         totals_table = Table(
             totals_data,
             colWidths=[
-                width * 0.04,
-                width * 0.25,
-                width * 0.10,
-                width * 0.07,
-                width * 0.12,
-                width * 0.08,
-                width * 0.18,
-                width * 0.16,
+                width * 0.05,   # #
+                width * 0.12,   # HS Code
+                width * 0.25,   # Item
+                width * 0.07,   # Qty
+                width * 0.10,   # Unit
+                width * 0.11,   # Rate
+                width * 0.07,   # Tax %
+                width * 0.11,   # Tax
+                width * 0.12,   # Amount
             ],
         )
         totals_table.setStyle(TableStyle([
-            ("LINEABOVE", (6, -1), (-1, -1), 1.5, self.PRIMARY_COLOR),
-            ("TOPPADDING", (0, 0), (-1, -1), 3),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+            ("VALIGN",      (0, 0), (-1, -1), "MIDDLE"),
+            ("TOPPADDING",  (0, 0), (-1, -1), 4),
+            ("BOTTOMPADDING",(0, 0), (-1, -1), 4),
+            ("LINEABOVE",   (-2, -3), (-1, -3), 1, self.MUTED_COLOR),
+            ("LINEBELOW",   (-2, -3), (-1, -3), 1, self.MUTED_COLOR),
+            ("BACKGROUND",  (-2, -3), (-1, -3), colors.HexColor("#f4fbf6")),
         ]))
         story.append(totals_table)
-        story.append(Spacer(1, 4 * mm))
- 
-        # ── PAYMENT SECTION ───────────────────────────────────────────
-        story.append(HRFlowable(
-            width="100%", thickness=0.5,
-            color=colors.HexColor("#e5e7eb"), spaceAfter=3 * mm
-        ))
-        story.append(Paragraph("PAYMENT DETAILS", section_style))
-        story.append(Spacer(1, 2 * mm))
- 
-        payment_rows = []
-        for payment in self.sale.payments.all():
-            payment_rows.append([
-                Paragraph(
-                    payment.get_payment_method_display(),
-                    header_style
-                ),
-                Paragraph(
-                    f"Rs. {payment.amount:.2f}",
-                    ParagraphStyle("pv", fontSize=9, alignment=TA_RIGHT)
-                ),
-            ])
- 
-        if float(self.sale.change_given) > 0:
-            payment_rows.append([
-                Paragraph("Change Given:", header_style),
-                Paragraph(
-                    f"Rs. {self.sale.change_given:.2f}",
-                    ParagraphStyle("pv", fontSize=9, alignment=TA_RIGHT)
-                ),
-            ])
- 
-        if payment_rows:
-            pay_table = Table(
-                payment_rows,
-                colWidths=[width * 0.5, width * 0.5],
-            )
-            pay_table.setStyle(TableStyle([
-                ("TOPPADDING",    (0, 0), (-1, -1), 2),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
-            ]))
-            story.append(pay_table)
- 
-        # ── FBR SECTION ───────────────────────────────────────────────
+        story.append(Spacer(1, 8 * mm))
+        
+        # ── FBR FOOTER ───────────────────────────────────────────────
+        story.append(Paragraph("FBR AUTHENTICATION", ParagraphStyle("fbr_auth_h", fontSize=8, fontName="Helvetica-Bold", textColor=self.ACCENT_COLOR, spaceAfter=2)))
+        auth_text = f"This invoice was submitted to FBR Digital Invoicing and validated by PRAL on <b>{completed.strftime('%d %b %Y, %H:%M')}</b>. "
         if self.sale.fbr_invoice_number:
-            story.append(Spacer(1, 4 * mm))
-            story.append(HRFlowable(
-                width="100%", thickness=0.5,
-                color=colors.HexColor("#e5e7eb"), spaceAfter=3 * mm
-            ))
- 
-            fbr_left = [
-                Paragraph("FBR VERIFIED INVOICE", section_style),
-                Spacer(1, 2 * mm),
-                Paragraph(
-                    f"<b>FBR Invoice Number:</b>",
-                    header_style
-                ),
-                Paragraph(
-                    self.sale.fbr_invoice_number,
-                    ParagraphStyle(
-                        "fbr_no", fontSize=8,
-                        textColor=self.PRIMARY_COLOR, fontName="Helvetica-Bold"
-                    )
-                ),
-                Spacer(1, 2 * mm),
-                Paragraph(
-                    f"<b>Scenario:</b> {self.sale.fbr_scenario_id or 'N/A'}",
-                    header_style
-                ),
-                Paragraph(
-                    f"<b>Submitted:</b> "
-                    f"{self.sale.fbr_submitted_at.strftime('%d-%b-%Y %I:%M %p') if self.sale.fbr_submitted_at else 'N/A'}",
-                    header_style
-                ),
-            ]
- 
-            fbr_right = []
-            if self.sale.fbr_qr_code:
-                qr_buffer = _generate_qr_image(self.sale.fbr_qr_code)
-                qr_img    = Image(qr_buffer, width=28 * mm, height=28 * mm)
-                fbr_right.append(qr_img)
-                fbr_right.append(
-                    Paragraph(
-                        "Scan to verify with FBR",
-                        ParagraphStyle(
-                            "qr_label", fontSize=7,
-                            alignment=TA_CENTER, textColor=self.MUTED_COLOR
-                        )
-                    )
-                )
- 
-            fbr_table = Table(
-                [[fbr_left, fbr_right]],
-                colWidths=[width * 0.65, width * 0.35],
-            )
-            fbr_table.setStyle(TableStyle([
-                ("VALIGN",       (0, 0), (-1, -1), "TOP"),
-                ("BACKGROUND",   (0, 0), (-1, -1), colors.HexColor("#eff6ff")),
-                ("LEFTPADDING",  (0, 0), (-1, -1), 10),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 10),
-                ("TOPPADDING",   (0, 0), (-1, -1), 8),
-                ("BOTTOMPADDING",(0, 0), (-1, -1), 8),
-                ("BOX",          (0, 0), (-1, -1), 1, self.PRIMARY_COLOR),
-            ]))
-            story.append(fbr_table)
- 
-        # ── FOOTER ────────────────────────────────────────────────────
-        story.append(Spacer(1, 6 * mm))
-        story.append(HRFlowable(
-            width="100%", thickness=0.5,
-            color=colors.HexColor("#e5e7eb"), spaceAfter=3 * mm
-        ))
-        story.append(Paragraph(
-            "Thank you for your business. This is a computer-generated invoice.",
-            ParagraphStyle(
-                "footer", fontSize=7, alignment=TA_CENTER,
-                textColor=self.MUTED_COLOR
-            )
-        ))
-        story.append(Paragraph(
-            f"Generated: {timezone.now().strftime('%d-%b-%Y %I:%M %p')}",
-            ParagraphStyle(
-                "footer2", fontSize=7, alignment=TA_CENTER,
-                textColor=self.MUTED_COLOR
-            )
-        ))
- 
+            auth_text += f"FBR Invoice Number: <b>{self.sale.fbr_invoice_number}</b>. "
+        auth_text += "To verify, scan the QR code with the FBR <b>Tax Asaan</b> app or look the number up at <b>e.fbr.gov.pk</b>. If the number cannot be verified there, the invoice is not authentic."
+        story.append(Paragraph(auth_text, ParagraphStyle("fbr_auth", fontSize=7, textColor=self.MUTED_COLOR, leading=10, spaceAfter=4)))
+        
+        story.append(Paragraph("This is a computer-generated invoice and does not require a physical signature. Errors and omissions excepted. Goods sold are not returnable except under our documented returns policy.", ParagraphStyle("fbr_auth2", fontSize=7, textColor=colors.HexColor("#aaaaaa"), leading=10, spaceAfter=2)))
+        story.append(Paragraph("Issued via FBR POS System - FBR Digital Invoicing compliant.", ParagraphStyle("fbr_auth3", fontSize=6, textColor=colors.HexColor("#aaaaaa"), leading=10)))
+        
         doc.build(story)
  
     def _save_to_s3(self, receipt_type: str) -> str:

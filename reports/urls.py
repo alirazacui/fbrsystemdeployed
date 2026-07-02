@@ -11,5 +11,10 @@ urlpatterns = [
     # ── Admin reports (platform admin only) ───────────────────────────
     path("reports/admin/invoices/", views.admin_all_invoices, name="admin-invoices"),
     path("reports/admin/activity/", views.admin_user_activity,name="admin-activity"),
+     path("reports/export/daily-sales/",   views.export_daily_sales,   name="export-daily"),
+    path("reports/export/monthly-sales/", views.export_monthly_sales, name="export-monthly"),
+    path("reports/export/product-sales/", views.export_product_sales, name="export-products"),
+    path("reports/export/cashier-sales/", views.export_cashier_sales, name="export-cashiers"),
+    path("reports/export/fbr-status/",    views.export_fbr_status,    name="export-fbr"),
 ]
  

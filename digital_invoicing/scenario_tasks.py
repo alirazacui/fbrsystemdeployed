@@ -46,7 +46,8 @@ def clear_sandbox_scenarios(self, company_id: int):
     """
     from companies.models import Company
     from .fbr_client import FBRClient, FBRAPIError
-    from .scenario_builder import ScenarioInvoiceBuilder
+    from .scenario_builder import ScenarioInvoiceBuilder, SCENARIO_TEMPLATES
+    from .models import ScenarioTestLog
  
     logger.info(f"[Scenarios] Starting auto-clear for Company ID: {company_id}")
  
@@ -69,7 +70,7 @@ def clear_sandbox_scenarios(self, company_id: int):
  
     logger.info(f"[Scenarios] {len(assigned)} scenarios to clear: {assigned}")
  
-    client  = FBRClient(token=company.fbr_sandbox_token, is_sandbox=True)
+    client  = FBRClient(token=company.fbr_sandbox_token, base_url=company.fbr_sandbox_endpoint, is_sandbox=True)
     results = {
         "passed":  [],
         "failed":  [],
@@ -80,11 +81,38 @@ def clear_sandbox_scenarios(self, company_id: int):
     for scenario_code in assigned:
         logger.info(f"[Scenarios] Submitting {scenario_code}...")
  
+        log_entry = ScenarioTestLog.objects.create(
+            company=company,
+            scenario_code=scenario_code,
+            status=ScenarioTestLog.Status.PENDING,
+        )
+
         try:
             builder = ScenarioInvoiceBuilder(company, scenario_code)
             payload = builder.build()
+            log_entry.request_payload = payload
+            log_entry.save(update_fields=["request_payload"])
+
             result  = client.submit_invoice(payload)
  
+            log_entry.status = ScenarioTestLog.Status.SUCCESS
+            log_entry.response_payload = result.get("raw_response", {})
+            log_entry.fbr_invoice_number = result.get("fbr_invoice_number", "")
+            log_entry.save()
+
+            from digital_invoicing.models import FBRSubmissionLog
+            FBRSubmissionLog.objects.create(
+                company=company,
+                environment="sandbox",
+                endpoint="postinvoicedata_sb",
+                local_invoice_id=scenario_code,
+                fbr_invoice_id=result.get("fbr_invoice_number", ""),
+                status_code="00",
+                http_status=200,
+                attempt=1,
+                error_message=""
+            )
+
             results["passed"].append({
                 "scenario":         scenario_code,
                 "fbr_invoice_no":   result["fbr_invoice_number"],
@@ -95,6 +123,23 @@ def clear_sandbox_scenarios(self, company_id: int):
             logger.info(f"[Scenarios] ✓ {scenario_code} passed — {result['fbr_invoice_number']}")
  
         except FBRAPIError as e:
+            log_entry.status = ScenarioTestLog.Status.FAILED
+            log_entry.error_message = f"[{e.error_code}] {e.message}"
+            log_entry.save()
+
+            from digital_invoicing.models import FBRSubmissionLog
+            FBRSubmissionLog.objects.create(
+                company=company,
+                environment="sandbox",
+                endpoint="postinvoicedata_sb",
+                local_invoice_id=scenario_code,
+                fbr_invoice_id="",
+                status_code=str(e.error_code)[:10] if e.error_code else "UNK",
+                http_status=200,
+                attempt=1,
+                error_message=e.message
+            )
+
             results["failed"].append({
                 "scenario":    scenario_code,
                 "error_code":  e.error_code,
@@ -103,6 +148,23 @@ def clear_sandbox_scenarios(self, company_id: int):
             logger.error(f"[Scenarios] ✗ {scenario_code} failed: [{e.error_code}] {e.message}")
  
         except Exception as e:
+            log_entry.status = ScenarioTestLog.Status.FAILED
+            log_entry.error_message = str(e)
+            log_entry.save()
+
+            from digital_invoicing.models import FBRSubmissionLog
+            FBRSubmissionLog.objects.create(
+                company=company,
+                environment="sandbox",
+                endpoint="postinvoicedata_sb",
+                local_invoice_id=scenario_code,
+                fbr_invoice_id="",
+                status_code="ERROR",
+                http_status=500,
+                attempt=1,
+                error_message=str(e)
+            )
+
             results["failed"].append({
                 "scenario": scenario_code,
                 "error":    str(e),
@@ -167,6 +229,7 @@ def clear_single_scenario(self, company_id: int, scenario_code: str):
     from companies.models import Company
     from .fbr_client import FBRClient, FBRAPIError
     from .scenario_builder import ScenarioInvoiceBuilder
+    from .models import ScenarioTestLog
  
     try:
         company = Company.objects.get(pk=company_id)
@@ -176,18 +239,63 @@ def clear_single_scenario(self, company_id: int, scenario_code: str):
     if not company.fbr_sandbox_token:
         return {"error": "No sandbox token set"}
  
-    client = FBRClient(token=company.fbr_sandbox_token, is_sandbox=True)
+    client = FBRClient(token=company.fbr_sandbox_token, base_url=company.fbr_sandbox_endpoint, is_sandbox=True)
+ 
+    log_entry = ScenarioTestLog.objects.create(
+        company=company,
+        scenario_code=scenario_code,
+        status=ScenarioTestLog.Status.PENDING,
+    )
  
     try:
         builder = ScenarioInvoiceBuilder(company, scenario_code)
         payload = builder.build()
+        log_entry.request_payload = payload
+        log_entry.save(update_fields=["request_payload"])
+
         result  = client.submit_invoice(payload)
+        
+        log_entry.status = ScenarioTestLog.Status.SUCCESS
+        log_entry.response_payload = result.get("raw_response", {})
+        log_entry.fbr_invoice_number = result.get("fbr_invoice_number", "")
+        log_entry.save()
+
+        from digital_invoicing.models import FBRSubmissionLog
+        FBRSubmissionLog.objects.create(
+            company=company,
+            environment="sandbox",
+            endpoint="postinvoicedata_sb",
+            local_invoice_id=scenario_code,
+            fbr_invoice_id=result.get("fbr_invoice_number", ""),
+            status_code="00",
+            http_status=200,
+            attempt=1,
+            error_message=""
+        )
+
         return {
             "scenario":       scenario_code,
             "status":         "passed",
             "fbr_invoice_no": result["fbr_invoice_number"],
         }
     except FBRAPIError as e:
+        log_entry.status = ScenarioTestLog.Status.FAILED
+        log_entry.error_message = f"[{e.error_code}] {e.message}"
+        log_entry.save()
+
+        from digital_invoicing.models import FBRSubmissionLog
+        FBRSubmissionLog.objects.create(
+            company=company,
+            environment="sandbox",
+            endpoint="postinvoicedata_sb",
+            local_invoice_id=scenario_code,
+            fbr_invoice_id="",
+            status_code=str(e.error_code)[:10] if e.error_code else "UNK",
+            http_status=200,
+            attempt=1,
+            error_message=e.message
+        )
+
         return {
             "scenario":   scenario_code,
             "status":     "failed",
@@ -195,6 +303,23 @@ def clear_single_scenario(self, company_id: int, scenario_code: str):
             "error":      e.message,
         }
     except Exception as e:
+        log_entry.status = ScenarioTestLog.Status.FAILED
+        log_entry.error_message = str(e)
+        log_entry.save()
+
+        from digital_invoicing.models import FBRSubmissionLog
+        FBRSubmissionLog.objects.create(
+            company=company,
+            environment="sandbox",
+            endpoint="postinvoicedata_sb",
+            local_invoice_id=scenario_code,
+            fbr_invoice_id="",
+            status_code="ERROR",
+            http_status=500,
+            attempt=1,
+            error_message=str(e)
+        )
+
         return {
             "scenario": scenario_code,
             "status":   "failed",

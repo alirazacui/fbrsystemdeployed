@@ -30,6 +30,7 @@ class AdminStaffViewSet(
     mixins.RetrieveModelMixin,
     mixins.UpdateModelMixin,
     mixins.ListModelMixin,
+    mixins.DestroyModelMixin,
     GenericViewSet,
 ):
     """
@@ -39,6 +40,7 @@ class AdminStaffViewSet(
     create   POST /api/admin-users/
     retrieve GET  /api/admin-users/{id}/
     update   PUT  /api/admin-users/{id}/
+    delete   DELETE /api/admin-users/{id}/
     status   PATCH /api/admin-users/{id}/status/
     """
     permission_classes = [IsAdmin]
@@ -60,6 +62,43 @@ class AdminStaffViewSet(
     @action(detail=True, methods=["patch"], url_path="status")
     def status(self, request, pk=None):
         """PATCH /api/admin-users/{id}/status/"""
+        user       = self.get_object()
+        serializer = UpdateUserStatusSerializer(
+            user, data=request.data, partial=True, context={"request": request}
+        )
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(UserDetailSerializer(user).data)
+ 
+ 
+class AllUsersViewSet(
+    mixins.RetrieveModelMixin,
+    mixins.UpdateModelMixin,
+    mixins.ListModelMixin,
+    mixins.DestroyModelMixin,
+    GenericViewSet,
+):
+    """
+    Platform Admin view to list and manage ALL users in the system.
+    
+    list     GET  /api/users/
+    retrieve GET  /api/users/{id}/
+    delete   DELETE /api/users/{id}/
+    status   PATCH /api/users/{id}/status/
+    """
+    permission_classes = [IsAdmin]
+    queryset = User.objects.all().order_by("-date_joined")
+    
+    def get_serializer_class(self):
+        if self.action == "status":
+            return UpdateUserStatusSerializer
+        if self.action == "list":
+            return UserListSerializer
+        return UserDetailSerializer
+        
+    @action(detail=True, methods=["patch"], url_path="status")
+    def status(self, request, pk=None):
+        """PATCH /api/users/{id}/status/"""
         user       = self.get_object()
         serializer = UpdateUserStatusSerializer(
             user, data=request.data, partial=True, context={"request": request}

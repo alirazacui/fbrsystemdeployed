@@ -2,7 +2,7 @@ from django.contrib import admin
 
 # Register your models here.
 from django.contrib import admin
-from .models import Category, Product
+from .models import *
 
 @admin.register(Category)
 class CategoryAdmin(admin.ModelAdmin):
@@ -72,4 +72,25 @@ class SaleReturnLineAdmin(admin.ModelAdmin):
     list_display = [
         "sale_return", "product_name",
         "quantity_returned", "return_line_total", "stock_restored"
+    ]
+
+
+
+ 
+@admin.register(DebitNote)
+class DebitNoteAdmin(admin.ModelAdmin):
+    list_display = [
+        "debit_note_number", "original_sale", "reason",
+        "status", "total_amount", "payment_collected",
+        "fbr_eligible", "created_at"
+    ]
+    list_filter  = ["status", "reason", "fbr_eligible", "payment_collected"]
+    search_fields = ["debit_note_number", "original_sale__sale_number"]
+    readonly_fields = ["debit_note_number", "created_at", "completed_at"]
+ 
+@admin.register(DebitNoteLine)
+class DebitNoteLineAdmin(admin.ModelAdmin):
+    list_display = [
+        "debit_note", "description",
+        "quantity", "unit_price", "line_total"
     ]

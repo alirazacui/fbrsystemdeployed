@@ -19,6 +19,10 @@ class CategorySerializer(serializers.ModelSerializer):
         source="company.business_name",
         read_only=True,
     )
+    parent_name = serializers.CharField(
+        source="parent.name",
+        read_only=True,
+    )
     product_count = serializers.SerializerMethodField()
  
     class Meta:
@@ -27,6 +31,8 @@ class CategorySerializer(serializers.ModelSerializer):
             "id",
             "company",
             "company_name",
+            "parent",
+            "parent_name",
             "name",
             "description",
             "is_active",
@@ -98,6 +104,7 @@ class ProductListSerializer(serializers.ModelSerializer):
             "unit_of_measure",
             "barcode",
             "sku",
+            "hs_code",
             "current_stock",
             "track_inventory",
             "is_low_stock",
@@ -325,6 +332,8 @@ class CustomerListSerializer(serializers.ModelSerializer):
             "id",
             "name",
             "ntn_cnic",
+            "cnic",
+            "ntn",
             "registration_type",
             "phone",
             "is_walk_in",
@@ -347,7 +356,16 @@ class CustomerDetailSerializer(serializers.ModelSerializer):
         read_only=True,
         default=None,
     )
- 
+    ntn_cnic = serializers.CharField(required=False, allow_blank=True, default="")
+    cnic = serializers.CharField(required=False, allow_blank=True, default="")
+    ntn = serializers.CharField(required=False, allow_blank=True, default="")
+    credit_limit = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        required=False,
+        default=0.00
+    )
+
     class Meta:
         model  = Customer
         fields = [
@@ -357,9 +375,13 @@ class CustomerDetailSerializer(serializers.ModelSerializer):
             # FBR buyer fields
             "name",
             "ntn_cnic",
+            "cnic",
+            "ntn",
             "registration_type",
             "province",
             "address",
+            "credit_limit",
+            "notes",
             # Contact
             "phone",
             "email",
@@ -392,11 +414,18 @@ class CustomerDetailSerializer(serializers.ModelSerializer):
             "registration_type",
             self.instance.registration_type if self.instance else BuyerRegistrationType.UNREGISTERED,
         )
-        ntn_cnic = attrs.get(
-            "ntn_cnic",
-            self.instance.ntn_cnic if self.instance else "",
-        )
- 
+        
+        # Pull from ntn or cnic if present
+        ntn = attrs.get("ntn", self.instance.ntn if self.instance else "").strip()
+        cnic = attrs.get("cnic", self.instance.cnic if self.instance else "").strip()
+        
+        ntn_cnic = ntn if ntn else cnic
+        if ntn_cnic:
+            attrs["ntn_cnic"] = ntn_cnic
+        else:
+            attrs["ntn_cnic"] = attrs.get("ntn_cnic", self.instance.ntn_cnic if self.instance else "")
+            ntn_cnic = attrs["ntn_cnic"]
+
         if reg_type == BuyerRegistrationType.REGISTERED:
             if not ntn_cnic:
                 raise serializers.ValidationError({
@@ -416,24 +445,20 @@ class CustomerDetailSerializer(serializers.ModelSerializer):
                         f"You provided {len(cleaned)} digits."
                     )
                 })
- 
+        # Check uniqueness of ntn_cnic within the company if provided
+        if ntn_cnic:
+            request = self.context.get("request")
+            company = request.user.company if not request.user.is_platform_admin else None
+            if company:
+                qs = Customer.objects.filter(company=company, ntn_cnic=ntn_cnic)
+                if self.instance:
+                    qs = qs.exclude(pk=self.instance.pk)
+                if qs.exists():
+                    raise serializers.ValidationError({
+                        "ntn_cnic": f"A customer with NTN/CNIC '{ntn_cnic}' already exists in your company."
+                    })
+
         return attrs
- 
-    def validate_ntn_cnic(self, value):
-        """NTN/CNIC must be unique per company if provided."""
-        if not value:
-            return value
-        request = self.context.get("request")
-        company = request.user.company if not request.user.is_platform_admin else None
-        if company:
-            qs = Customer.objects.filter(company=company, ntn_cnic=value)
-            if self.instance:
-                qs = qs.exclude(pk=self.instance.pk)
-            if qs.exists():
-                raise serializers.ValidationError(
-                    f"A customer with NTN/CNIC '{value}' already exists in your company."
-                )
-        return value
  
     def create(self, validated_data):
         request = self.context.get("request")
@@ -594,6 +619,10 @@ class AddSaleLineSerializer(serializers.Serializer):
     product_id      = serializers.IntegerField()
     quantity        = serializers.DecimalField(
         max_digits=12, decimal_places=3, min_value=0.001
+    )
+    unit_price      = serializers.DecimalField(
+        max_digits=12, decimal_places=2,
+        min_value=0, required=False,
     )
     discount_amount = serializers.DecimalField(
         max_digits=12, decimal_places=2,
@@ -831,6 +860,9 @@ class CreateSaleSerializer(serializers.ModelSerializer):
     class Meta:
         model  = Sale
         fields = ["customer", "cash_session", "sale_type", "notes"]
+        extra_kwargs = {
+            "customer": {"required": False, "allow_null": True}
+        }
  
     def validate_customer(self, customer):
         """Customer must belong to same company."""
@@ -854,9 +886,20 @@ class CreateSaleSerializer(serializers.ModelSerializer):
             )
         if session and session.cashier != self.context["request"].user:
             raise serializers.ValidationError(
-                "Cash session does not belong to you."
+                "You cannot create a sale in someone else's cash session."
             )
         return session
+
+    def validate(self, attrs):
+        request = self.context["request"]
+        company = request.user.company
+        if not attrs.get("customer"):
+            from .models import Customer
+            walk_in = Customer.objects.filter(company=company, is_walk_in=True).first()
+            if not walk_in:
+                raise serializers.ValidationError({"customer": "Walk-in customer not found. Please specify a customer."})
+            attrs["customer"] = walk_in
+        return attrs
  
     def create(self, validated_data):
         request = self.context["request"]
@@ -1100,3 +1143,204 @@ class SaleReturnSerializer(serializers.ModelSerializer):
             "completed_at",
         ]
         read_only_fields = fields
+
+
+"""
+========================================================
+pos/debit_note_serializers.py
+Add to pos/serializers.py
+========================================================
+"""
+ 
+from rest_framework import serializers
+ 
+ 
+class DebitNoteLineInputSerializer(serializers.Serializer):
+    """Input for one debit note line."""
+ 
+    # For forgotten items — provide product_id
+    product_id = serializers.IntegerField(required=False, allow_null=True)
+ 
+    # For price corrections — provide original_line_id
+    original_line_id = serializers.IntegerField(
+        required=False, allow_null=True
+    )
+ 
+    # For service charges — provide description directly
+    description      = serializers.CharField(max_length=255, required=False)
+    tax_rate_percent = serializers.CharField(
+        max_length=10, default="18%", required=False
+    )
+    fbr_sale_type    = serializers.CharField(
+        max_length=80,
+        default="Goods at standard rate (default)",
+        required=False,
+    )
+ 
+    # Always required
+    quantity   = serializers.DecimalField(
+        max_digits=12, decimal_places=3, min_value=0.001
+    )
+    unit_price = serializers.DecimalField(
+        max_digits=12, decimal_places=2, min_value=0
+    )
+ 
+    def validate(self, attrs):
+        product_id       = attrs.get("product_id")
+        original_line_id = attrs.get("original_line_id")
+        description      = attrs.get("description", "")
+ 
+        # Must provide at least one identifier
+        if not product_id and not original_line_id and not description:
+            raise serializers.ValidationError(
+                "Provide product_id, original_line_id, or description."
+            )
+        return attrs
+ 
+ 
+class CreateDebitNoteSerializer(serializers.Serializer):
+    """
+    Creates a debit note against a completed sale.
+ 
+    Body:
+    {
+        "original_sale_id": 5,
+        "reason": "forgotten_items",
+        "reason_notes": "Forgot to add 2 bottles",
+        "payment_method": "cash",
+        "amount_paid": 600.00,
+        "lines": [
+            {
+                "product_id": 12,
+                "quantity": 2,
+                "unit_price": 200.00
+            },
+            {
+                "description": "Delivery charge",
+                "quantity": 1,
+                "unit_price": 100.00,
+                "tax_rate_percent": "0%",
+                "fbr_sale_type": "Services"
+            }
+        ]
+    }
+    """
+    original_sale_id = serializers.IntegerField()
+    reason           = serializers.ChoiceField(
+        choices=DebitNoteReason.choices
+    )
+    reason_notes     = serializers.CharField(
+        required=False, default="", max_length=500
+    )
+    payment_method   = serializers.ChoiceField(
+        choices=["cash", "card", "bank_transfer"],
+        default="cash",
+    )
+    amount_paid      = serializers.DecimalField(
+        max_digits=14, decimal_places=2, min_value=0
+    )
+    lines = serializers.ListField(
+        child=DebitNoteLineInputSerializer(),
+        min_length=1,
+    )
+ 
+    def validate_original_sale_id(self, sale_id):
+        from pos.models import Sale, SaleStatus
+        request = self.context["request"]
+        try:
+            sale = Sale.objects.get(
+                pk      = sale_id,
+                company = request.user.company,
+                status  = SaleStatus.COMPLETED,
+            )
+        except Sale.DoesNotExist:
+            raise serializers.ValidationError(
+                "Sale not found or not completed."
+            )
+ 
+        if not sale.fbr_invoice_number and sale.company.module_fbr_di:
+            raise serializers.ValidationError(
+                "Original sale has not been submitted to FBR yet."
+            )
+ 
+        self.context["original_sale"] = sale
+        return sale_id
+ 
+    def validate_reason_notes(self, value):
+        reason = self.initial_data.get("reason", "")
+        if reason == "other" and not value:
+            raise serializers.ValidationError(
+                "Notes are required when reason is 'Other'."
+            )
+        return value
+ 
+ 
+class DebitNoteLineSerializer(serializers.ModelSerializer):
+    class Meta:
+        model  = DebitNoteLine
+        fields = [
+            "id", "description", "hs_code", "unit_of_measure",
+            "fbr_sale_type", "tax_rate_percent",
+            "quantity", "unit_price",
+            "value_excl_tax", "tax_amount", "line_total",
+        ]
+        read_only_fields = fields
+ 
+ 
+class DebitNoteSerializer(serializers.ModelSerializer):
+    """Full debit note detail."""
+    lines                    = DebitNoteLineSerializer(many=True, read_only=True)
+    original_sale_number     = serializers.CharField(
+        source="original_sale.sale_number", read_only=True
+    )
+    debit_note_sale_number   = serializers.CharField(
+        source="debit_note_sale.sale_number",
+        read_only=True, default=None,
+    )
+    fbr_debit_note_number    = serializers.CharField(
+        source="debit_note_sale.fbr_invoice_number",
+        read_only=True, default=None,
+    )
+    processed_by_email       = serializers.EmailField(
+        source="processed_by.email", read_only=True
+    )
+    reason_display           = serializers.CharField(
+        source="get_reason_display", read_only=True
+    )
+ 
+    class Meta:
+        model  = DebitNote
+        fields = [
+            "id",
+            "debit_note_number",
+            "status",
+            "reason",
+            "reason_display",
+            "reason_notes",
+            "original_sale",
+            "original_sale_number",
+            "debit_note_sale",
+            "debit_note_sale_number",
+            "fbr_debit_note_number",
+            "total_amount",
+            "total_tax",
+            "payment_method",
+            "amount_paid",
+            "change_given",
+            "payment_collected",
+            "payment_collected_at",
+            "fbr_eligible",
+            "fbr_eligibility_reason",
+            "processed_by",
+            "processed_by_email",
+            "lines",
+            "created_at",
+            "completed_at",
+        ]
+        read_only_fields = fields
+
+
+class HSCodeSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = HSCode
+        fields = ['id', 'code', 'description', 'default_rate', 'uom']

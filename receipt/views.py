@@ -10,6 +10,7 @@ receipts/views.py
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework import status as http_status
+from django.http import HttpResponse
 from common.permissions import IsActiveUser
 from .generators import *
  
@@ -27,7 +28,6 @@ def get_thermal_receipt(request, sale_id):
         sale = Sale.objects.get(
             pk      = sale_id,
             company = request.user.company,
-            status  = SaleStatus.COMPLETED,
         )
     except Sale.DoesNotExist:
         return Response(
@@ -60,7 +60,6 @@ def get_a4_invoice(request, sale_id):
         sale = Sale.objects.get(
             pk      = sale_id,
             company = request.user.company,
-            status  = SaleStatus.COMPLETED,
         )
     except Sale.DoesNotExist:
         return Response(
@@ -70,8 +69,11 @@ def get_a4_invoice(request, sale_id):
  
     try:
         generator = A4InvoiceGenerator(sale)
-        url       = generator.generate()
-        return Response({"url": url, "type": "a4"})
+        generator._build_pdf()
+        generator.buffer.seek(0)
+        response = HttpResponse(generator.buffer.read(), content_type='application/pdf')
+        response['Content-Disposition'] = f'inline; filename="invoice_{sale.sale_number or sale.id}.pdf"'
+        return response
     except Exception as e:
         logger.error(f"A4 invoice generation failed for sale {sale_id}: {e}")
         return Response(

@@ -4,17 +4,20 @@ pos/views.py  — Product & Category section
 ========================================================
 """
  
-from rest_framework import mixins, status
+from rest_framework import mixins, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.viewsets import GenericViewSet
+from companies.mixins import AuditLogMixin
  
 from common.permissions import IsOwnerOrAdmin, IsClientUser, IsActiveUser
-from .models import Category, Product
+from .models import *
 from pos.serializer import *
+
  
  
 class CategoryViewSet(
+    AuditLogMixin,
     mixins.CreateModelMixin,
     mixins.RetrieveModelMixin,
     mixins.UpdateModelMixin,
@@ -44,6 +47,7 @@ class CategoryViewSet(
  
  
 class ProductViewSet(
+    AuditLogMixin,
     mixins.CreateModelMixin,
     mixins.RetrieveModelMixin,
     mixins.UpdateModelMixin,
@@ -172,6 +176,8 @@ class ProductViewSet(
         )
         serializer.is_valid(raise_exception=True)
         serializer.save()
+        if hasattr(self, 'log_audit_action'):
+            self.log_audit_action("update", product)
         return Response({
             "detail":        "Stock updated successfully.",
             "current_stock": product.current_stock,
@@ -189,6 +195,7 @@ from .serializer import CustomerDetailSerializer, CustomerListSerializer
  
  
 class CustomerViewSet(
+    AuditLogMixin,
     mixins.CreateModelMixin,
     mixins.RetrieveModelMixin,
     mixins.UpdateModelMixin,
@@ -302,6 +309,8 @@ class CustomerViewSet(
         customer           = self.get_object()
         customer.is_active = True
         customer.save(update_fields=["is_active", "updated_at"])
+        if hasattr(self, 'log_audit_action'):
+            self.log_audit_action("update", customer)
         return Response({"detail": f"Customer '{customer.name}' activated."})
  
     @action(detail=True, methods=["post"], url_path="deactivate")
@@ -315,6 +324,8 @@ class CustomerViewSet(
             )
         customer.is_active = False
         customer.save(update_fields=["is_active", "updated_at"])
+        if hasattr(self, 'log_audit_action'):
+            self.log_audit_action("update", customer)
         return Response({"detail": f"Customer '{customer.name}' deactivated."})
 
 
@@ -332,7 +343,7 @@ from .models import (
 )
  
  
-class CashSessionViewSet(GenericViewSet):
+class CashSessionViewSet(AuditLogMixin, viewsets.ModelViewSet):
     """
     Cash session (shift) management.
  
@@ -360,6 +371,8 @@ class CashSessionViewSet(GenericViewSet):
         )
         serializer.is_valid(raise_exception=True)
         session = serializer.save()
+        if hasattr(self, 'log_audit_action'):
+            self.log_audit_action("create", session)
         return Response(
             CashSessionSerializer(session).data,
             status=status.HTTP_201_CREATED,
@@ -388,6 +401,8 @@ class CashSessionViewSet(GenericViewSet):
             closing_balance=serializer.validated_data["closing_balance"],
             note=serializer.validated_data.get("closing_note", ""),
         )
+        if hasattr(self, 'log_audit_action'):
+            self.log_audit_action("update", session)
         return Response(CashSessionSerializer(session).data)
  
     @action(detail=False, methods=["get"], url_path="current")
@@ -419,7 +434,7 @@ class CashSessionViewSet(GenericViewSet):
         return Response(serializer.data)
  
  
-class SaleViewSet(GenericViewSet):
+class SaleViewSet(AuditLogMixin, viewsets.ModelViewSet):
     """
     Core POS transaction ViewSet.
  
@@ -460,6 +475,8 @@ class SaleViewSet(GenericViewSet):
         )
         serializer.is_valid(raise_exception=True)
         sale = serializer.save()
+        if hasattr(self, 'log_audit_action'):
+            self.log_audit_action("create", sale)
         return Response(
             SaleDetailSerializer(sale).data,
             status=status.HTTP_201_CREATED,
@@ -478,21 +495,27 @@ class SaleViewSet(GenericViewSet):
         )
         serializer.is_valid(raise_exception=True)
  
-        product  = serializer.validated_data["product"]
-        quantity = serializer.validated_data["quantity"]
-        discount = serializer.validated_data.get("discount_amount", 0)
+        product    = serializer.validated_data["product"]
+        quantity   = serializer.validated_data["quantity"]
+        discount   = serializer.validated_data.get("discount_amount", 0)
+        unit_price = serializer.validated_data.get("unit_price")
  
         # If product already on sale, update quantity instead of adding duplicate
         existing = sale.lines.filter(product=product).first()
         if existing:
             existing.quantity        = float(existing.quantity) + float(quantity)
             existing.discount_amount = float(existing.discount_amount) + float(discount)
+            if unit_price is not None:
+                existing.unit_price = float(unit_price)
             existing.save()
         else:
-            line = SaleLine.from_product(sale, product, quantity, float(discount))
+            line = SaleLine.from_product(sale, product, quantity, float(discount), unit_price)
             line.save()
  
         sale.compute_totals()
+        if sale.fbr_submission_status == "validated":
+            sale.fbr_submission_status = "pending"
+            sale.save(update_fields=["fbr_submission_status"])
         return Response(SaleDetailSerializer(sale).data)
  
     # ── 3. Remove line ────────────────────────────────────────────────
@@ -579,33 +602,129 @@ class SaleViewSet(GenericViewSet):
         with transaction.atomic():
             # Complete the sale
             sale.complete()
- 
-            # Decrement stock for all lines where track_inventory=True
-            for line in sale.lines.select_related("product").all():
-                product = line.product
-                if product.track_inventory:
-                    # Double-check stock hasn't changed since validation
-                    product.refresh_from_db()
-                    if float(product.current_stock) < float(line.quantity):
-                        raise serializer.ValidationError(
-                            f"Stock for '{product.name}' changed during "
-                            f"transaction. Please retry."
-                        )
-                    product.current_stock = (
-                        float(product.current_stock) - float(line.quantity)
-                    )
-                    product.save(update_fields=["current_stock", "updated_at"])
- 
+
             # Mark FBR submission as pending
             # Actual submission happens in Phase 3 via Celery task
             if sale.company.module_fbr_di:
                 sale.fbr_submission_status = FBRSubmissionStatus.PENDING
+                from digital_invoicing.tasks import submit_invoice_to_fbr
+                submit_invoice_to_fbr.delay(sale.id)
             else:
                 sale.fbr_submission_status = FBRSubmissionStatus.SKIPPED
             sale.save(update_fields=["fbr_submission_status", "updated_at"])
  
         return Response(SaleDetailSerializer(sale).data)
  
+    # ── Validate invoice with FBR ─────────────────────────────────────
+    
+    @action(detail=True, methods=["post"], url_path="validate_fbr")
+    def validate_fbr(self, request, pk=None):
+        """POST /api/pos/sales/{id}/validate_fbr/"""
+        sale = self.get_object()
+        company = sale.company
+        
+        if not company.module_fbr_di:
+            return Response({"detail": "FBR DI module is not enabled for this company."}, status=400)
+            
+        is_sandbox = True
+        if company.fbr_sandbox_complete and company.fbr_production_token:
+            is_sandbox = False
+            token = company.fbr_production_token
+        elif company.fbr_sandbox_token:
+            is_sandbox = True
+            token = company.fbr_sandbox_token
+        else:
+            return Response({"detail": "FBR token is not configured. Please set a Sandbox or Production token."}, status=400)
+            
+        from digital_invoicing.invoice_builder import FBRInvoiceBuilder
+        from digital_invoicing.fbr_client import FBRClient, FBRAPIError
+        
+        builder = FBRInvoiceBuilder(sale)
+        try:
+            payload = builder.build()
+            
+            # Print to terminal
+            print("\n" + "="*50)
+            print(f"FBR VALIDATION TRIGGERED ({'SANDBOX' if is_sandbox else 'PRODUCTION'})")
+            print(f"Token: {token}")
+            import json
+            print(f"Payload: {json.dumps(payload, indent=2)}")
+            print("="*50 + "\n")
+            
+        except Exception as e:
+            return Response({"detail": f"Failed to build invoice payload: {str(e)}"}, status=400)
+            
+        base_url = company.fbr_sandbox_endpoint if is_sandbox else company.fbr_production_endpoint
+        client = FBRClient(token=token, base_url=base_url, is_sandbox=is_sandbox)
+        try:
+            start_time = __import__('time').time()
+            res = client.validate_invoice(payload)
+            latency_ms = int((__import__('time').time() - start_time) * 1000)
+            
+            sale.fbr_submission_status = "validated"
+            sale.save(update_fields=["fbr_submission_status"])
+
+            from digital_invoicing.models import FBRSubmissionLog
+            FBRSubmissionLog.objects.create(
+                company=company,
+                sale=sale,
+                environment="sandbox" if is_sandbox else "production",
+                endpoint="validateinvoicedata_sb" if is_sandbox else "validateinvoicedata",
+                local_invoice_id=sale.sale_number,
+                fbr_invoice_id="",
+                status_code="00",
+                http_status=200,
+                attempt=1,
+                latency_ms=latency_ms,
+                error_message=""
+            )
+
+            if hasattr(self, 'log_audit_action'):
+                self.log_audit_action("validate_fbr", sale)
+
+            return Response({"detail": "Invoice validated successfully with FBR.", "fbr_response": res})
+        except FBRAPIError as e:
+            latency_ms = int((__import__('time').time() - start_time) * 1000)
+            from digital_invoicing.models import FBRSubmissionLog
+            FBRSubmissionLog.objects.create(
+                company=company,
+                sale=sale,
+                environment="sandbox" if is_sandbox else "production",
+                endpoint="validateinvoicedata_sb" if is_sandbox else "validateinvoicedata",
+                local_invoice_id=sale.sale_number,
+                fbr_invoice_id="",
+                status_code=e.error_code,
+                http_status=200,
+                attempt=1,
+                latency_ms=latency_ms,
+                error_message=e.message
+            )
+            return Response({"detail": str(e), "error_code": getattr(e, 'error_code', 'UNKNOWN')}, status=400)
+        except Exception as e:
+            latency_ms = int((__import__('time').time() - start_time) * 1000)
+            from digital_invoicing.models import FBRSubmissionLog
+            FBRSubmissionLog.objects.create(
+                company=company,
+                sale=sale,
+                environment="sandbox" if is_sandbox else "production",
+                endpoint="validateinvoicedata_sb" if is_sandbox else "validateinvoicedata",
+                local_invoice_id=sale.sale_number,
+                fbr_invoice_id="",
+                status_code="ERROR",
+                http_status=500,
+                attempt=1,
+                latency_ms=latency_ms,
+                error_message=str(e)
+            )
+            return Response({"detail": f"FBR validation failed: {str(e)}"}, status=400)
+
+    @action(detail=True, methods=["post"], url_path="log_download")
+    def log_download(self, request, pk=None):
+        sale = self.get_object()
+        if hasattr(self, 'log_audit_action'):
+            self.log_audit_action("download", sale)
+        return Response({"detail": "Download logged successfully."})
+
     # ── Cancel sale ───────────────────────────────────────────────────
  
     @action(detail=True, methods=["post"], url_path="cancel")
@@ -623,6 +742,8 @@ class SaleViewSet(GenericViewSet):
  
         sale.status = SaleStatus.CANCELLED
         sale.save(update_fields=["status", "updated_at"])
+        if hasattr(self, 'log_audit_action'):
+            self.log_audit_action("update", sale) # explicitly log cancellation
         return Response(SaleDetailSerializer(sale).data)
  
     # ── List & retrieve ───────────────────────────────────────────────
@@ -662,21 +783,8 @@ class SaleViewSet(GenericViewSet):
         return Response(serializer.data)
     
 
-"""
-========================================================
-pos/return_views.py
-Add to pos/views.py
-========================================================
-"""
  
-from rest_framework import mixins, status
-from rest_framework.decorators import action
-from rest_framework.response import Response
-from rest_framework.viewsets import GenericViewSet
-from django.db import transaction
- 
- 
-class SaleReturnViewSet(GenericViewSet):
+class SaleReturnViewSet(AuditLogMixin, viewsets.ModelViewSet):
     """
     Returns & Refunds management.
  
@@ -868,6 +976,8 @@ class SaleReturnViewSet(GenericViewSet):
                 credit_note.fbr_submission_status = FBRSubmissionStatus.SKIPPED
                 credit_note.save(update_fields=["fbr_submission_status"])
  
+        if hasattr(self, 'log_audit_action'):
+            self.log_audit_action("create", sale_return)
         return Response(
             SaleReturnSerializer(sale_return).data,
             status=status.HTTP_201_CREATED,
@@ -895,7 +1005,9 @@ class SaleReturnViewSet(GenericViewSet):
         sale_return.refund_paid    = True
         sale_return.refund_paid_at = timezone.now()
         sale_return.save(update_fields=["refund_paid", "refund_paid_at", "updated_at"])
- 
+        if hasattr(self, 'log_audit_action'):
+            self.log_audit_action("update", sale_return)
+
         return Response(SaleReturnSerializer(sale_return).data)
  
     @action(detail=False, methods=["get"], url_path="list")
@@ -914,3 +1026,386 @@ class SaleReturnViewSet(GenericViewSet):
         """GET /api/returns/{id}/detail/"""
         from pos.serializer import SaleReturnSerializer
         return Response(SaleReturnSerializer(self.get_object()).data)
+ 
+ 
+class DebitNoteViewSet(AuditLogMixin, viewsets.ModelViewSet):
+    """
+    Debit Notes management.
+ 
+    create   POST /api/debit-notes/
+    list     GET  /api/debit-notes/
+    retrieve GET  /api/debit-notes/{id}/
+    cancel   POST /api/debit-notes/{id}/cancel/
+    """
+    permission_classes = [IsClientUser]
+ 
+    def get_queryset(self):
+        user = self.request.user
+        if user.is_platform_admin:
+            return DebitNote.objects.all()
+        return DebitNote.objects.filter(
+            company=user.company
+        ).select_related(
+            "original_sale", "debit_note_sale",
+            "processed_by", "company"
+        ).prefetch_related("lines").order_by("-created_at")
+ 
+    @action(detail=False, methods=["post"], url_path="")
+    def create_debit_note(self, request):
+        """
+        POST /api/debit-notes/
+ 
+        Complete flow in one atomic transaction:
+        1. Validate input + original sale
+        2. Check FBR 72-hour eligibility
+        3. Create DebitNote + DebitNoteLines
+        4. Collect payment
+        5. Create Debit Note Sale
+        6. Trigger FBR submission
+        """
+        from pos.models import (
+            Sale, SaleStatus, SaleType,
+            SaleLine, SalePayment, FBRSubmissionStatus,
+            PaymentMethod,
+        )
+ 
+        serializer = CreateDebitNoteSerializer(
+            data=request.data,
+            context={"request": request},
+        )
+        serializer.is_valid(raise_exception=True)
+ 
+        original_sale  = serializer.context["original_sale"]
+        lines_data     = serializer.validated_data["lines"]
+        reason         = serializer.validated_data["reason"]
+        reason_notes   = serializer.validated_data.get("reason_notes", "")
+        payment_method = serializer.validated_data["payment_method"]
+        amount_paid    = float(serializer.validated_data["amount_paid"])
+ 
+        with transaction.atomic():
+            # ── Create DebitNote ──────────────────────────────────────
+            debit_note = DebitNote(
+                company       = request.user.company,
+                original_sale = original_sale,
+                processed_by  = request.user,
+                reason        = reason,
+                reason_notes  = reason_notes,
+                payment_method = payment_method,
+                status        = DebitNoteStatus.DRAFT,
+            )
+            debit_note.check_fbr_eligibility()
+            debit_note.save()
+ 
+            # ── Create DebitNoteLines ─────────────────────────────────
+            for line_data in lines_data:
+                product_id       = line_data.get("product_id")
+                original_line_id = line_data.get("original_line_id")
+                description      = line_data.get("description", "")
+ 
+                # Resolve product info
+                product      = None
+                original_ln  = None
+                hs_code      = ""
+                uom          = "Numbers, pieces, units"
+                fbr_sale_type = line_data.get(
+                    "fbr_sale_type", "Goods at standard rate (default)"
+                )
+                tax_rate = line_data.get("tax_rate_percent", "18%")
+ 
+                if product_id:
+                    from pos.models import Product
+                    try:
+                        product      = Product.objects.get(
+                            pk      = product_id,
+                            company = request.user.company,
+                        )
+                        description  = product.name
+                        hs_code      = product.hs_code
+                        uom          = product.unit_of_measure
+                        fbr_sale_type = product.fbr_sale_type
+                        tax_rate     = product.tax_rate_percent
+                    except Product.DoesNotExist:
+                        pass
+ 
+                elif original_line_id:
+                    try:
+                        original_ln  = SaleLine.objects.get(
+                            pk   = original_line_id,
+                            sale = original_sale,
+                        )
+                        description   = (
+                            f"Price correction: {original_ln.product_name}"
+                        )
+                        hs_code       = original_ln.hs_code
+                        uom           = original_ln.unit_of_measure
+                        fbr_sale_type = original_ln.fbr_sale_type
+                        tax_rate      = original_ln.tax_rate_percent
+                    except SaleLine.DoesNotExist:
+                        pass
+ 
+                DebitNoteLine.objects.create(
+                    debit_note      = debit_note,
+                    product         = product,
+                    original_line   = original_ln,
+                    description     = description,
+                    hs_code         = hs_code,
+                    unit_of_measure = uom,
+                    fbr_sale_type   = fbr_sale_type,
+                    tax_rate_percent = tax_rate,
+                    quantity        = line_data["quantity"],
+                    unit_price      = line_data["unit_price"],
+                )
+ 
+            # ── Compute totals ────────────────────────────────────────
+            debit_note.compute_totals()
+            total_amount = float(debit_note.total_amount)
+ 
+            # ── Validate payment covers total ─────────────────────────
+            if amount_paid < total_amount:
+                raise serializers.ValidationError(
+                    f"Amount paid (Rs. {amount_paid:.2f}) is less than "
+                    f"total (Rs. {total_amount:.2f})."
+                )
+ 
+            change_given = round(amount_paid - total_amount, 2)
+ 
+            # ── Mark payment collected ────────────────────────────────
+            debit_note.amount_paid           = amount_paid
+            debit_note.change_given          = change_given
+            debit_note.payment_collected     = True
+            debit_note.payment_collected_at  = timezone.now()
+            debit_note.status                = DebitNoteStatus.COMPLETED
+            debit_note.completed_at          = timezone.now()
+            debit_note.save()
+ 
+            # ── Create Debit Note Sale ────────────────────────────────
+            dn_sale = Sale(
+                company       = request.user.company,
+                cashier       = request.user,
+                customer      = original_sale.customer,
+                sale_type     = SaleType.DEBIT_NOTE,
+                status        = SaleStatus.COMPLETED,
+                original_sale = original_sale,
+                subtotal      = debit_note.total_amount - debit_note.total_tax,
+                total_tax     = debit_note.total_tax,
+                total_amount  = debit_note.total_amount,
+                amount_paid   = amount_paid,
+                change_given  = change_given,
+                notes         = (
+                    f"Debit Note {debit_note.debit_note_number}. "
+                    f"Reason: {debit_note.get_reason_display()}. "
+                    f"{reason_notes}"
+                ),
+                completed_at  = timezone.now(),
+            )
+            dn_sale.save()
+ 
+            # ── Create sale lines on Debit Note Sale ──────────────────
+            for dn_line in debit_note.lines.all():
+                SaleLine.objects.create(
+                    sale               = dn_sale,
+                    product            = dn_line.product,
+                    product_name       = dn_line.description,
+                    hs_code            = dn_line.hs_code,
+                    unit_of_measure    = dn_line.unit_of_measure,
+                    fbr_sale_type      = dn_line.fbr_sale_type,
+                    tax_rate_percent   = dn_line.tax_rate_percent,
+                    quantity           = dn_line.quantity,
+                    unit_price         = dn_line.unit_price,
+                    discount_amount    = 0,
+                    value_excl_tax     = dn_line.value_excl_tax,
+                    sales_tax_applicable = dn_line.tax_amount,
+                    line_total         = dn_line.line_total,
+                )
+ 
+            # ── Create payment record ─────────────────────────────────
+            SalePayment.objects.create(
+                sale           = dn_sale,
+                payment_method = payment_method,
+                amount         = debit_note.total_amount,
+            )
+ 
+            # ── Link debit note sale ──────────────────────────────────
+            debit_note.debit_note_sale = dn_sale
+            debit_note.save(update_fields=["debit_note_sale"])
+ 
+            # ── Trigger FBR submission ────────────────────────────────
+            if debit_note.fbr_eligible and request.user.company.module_fbr_di:
+                dn_sale.fbr_submission_status = FBRSubmissionStatus.PENDING
+                dn_sale.save(update_fields=["fbr_submission_status"])
+                from digital_invoicing.tasks import submit_invoice_to_fbr
+                submit_invoice_to_fbr.delay(dn_sale.pk)
+            else:
+                dn_sale.fbr_submission_status = FBRSubmissionStatus.SKIPPED
+                dn_sale.save(update_fields=["fbr_submission_status"])
+ 
+        if hasattr(self, 'log_audit_action'):
+            self.log_audit_action("create", debit_note)
+        return Response(
+            DebitNoteSerializer(debit_note).data,
+            status=status.HTTP_201_CREATED,
+        )
+ 
+    @action(detail=True, methods=["post"], url_path="cancel")
+    def cancel(self, request, pk=None):
+        """
+        POST /api/debit-notes/{id}/cancel/
+        Only DRAFT debit notes can be cancelled.
+        """
+       
+        dn = self.get_object()
+ 
+        if dn.status != DebitNoteStatus.DRAFT:
+            return Response(
+                {"detail": "Only DRAFT debit notes can be cancelled."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+ 
+        dn.status = DebitNoteStatus.CANCELLED
+        dn.save(update_fields=["status", "updated_at"])
+        if hasattr(self, 'log_audit_action'):
+            self.log_audit_action("update", dn)
+        return Response(DebitNoteSerializer(dn).data)
+ 
+    @action(detail=False, methods=["get"], url_path="list")
+    def list_debit_notes(self, request):
+        """GET /api/debit-notes/list/"""
+    
+        qs         = self.get_queryset()
+        page       = self.paginate_queryset(qs)
+        serializer = DebitNoteSerializer(page or qs, many=True)
+        if page is not None:
+            return self.get_paginated_response(serializer.data)
+        return Response(serializer.data)
+ 
+    @action(detail=True, methods=["get"], url_path="detail")
+    def retrieve_debit_note(self, request, pk=None):
+        """GET /api/debit-notes/{id}/detail/"""
+        
+        return Response(DebitNoteSerializer(self.get_object()).data)
+
+
+from rest_framework import viewsets, filters, permissions
+from rest_framework.pagination import PageNumberPagination
+from companies.mixins import AuditLogMixin
+
+class StandardResultsSetPagination(PageNumberPagination):
+    page_size = 50
+    page_size_query_param = 'page_size'
+    max_page_size = 1000
+
+ 
+class HSCodeViewSet(viewsets.ReadOnlyModelViewSet):
+    queryset = HSCode.objects.all()
+    serializer_class = HSCodeSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    filter_backends = [filters.SearchFilter]
+    search_fields = ['code', 'description']
+    pagination_class = StandardResultsSetPagination
+
+
+from rest_framework.views import APIView
+from django.db.models import Sum, F, Count
+from datetime import timedelta
+
+class DashboardStatsView(APIView):
+    """
+    Returns aggregate stats for the company dashboard.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, *args, **kwargs):
+        company = request.user.company
+        if not company:
+            return Response({"error": "User does not belong to a company"}, status=400)
+
+        now = timezone.now()
+        start_of_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        start_of_today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        thirty_days_ago = now - timedelta(days=30)
+
+        # Products
+        products = Product.objects.filter(company=company)
+        active_products = products.filter(is_active=True).count()
+        
+        # Stock Value
+        stock_value = products.filter(track_inventory=True).aggregate(
+            total_value=Sum(F('current_stock') * F('cost_price'))
+        )['total_value'] or 0
+        
+        # Low Stock
+        low_stock_products = products.filter(
+            track_inventory=True,
+            current_stock__lte=F('low_stock_threshold'),
+            is_active=True
+        ).values('id', 'name', 'current_stock', 'low_stock_threshold')[:5]
+
+        # Customers
+        total_customers = Customer.objects.filter(company=company).count()
+
+        # Sales Base
+        sales = Sale.objects.filter(company=company, status='completed')
+        
+        # Month Stats
+        month_sales = sales.filter(completed_at__gte=start_of_month)
+        invoices_this_month = month_sales.count()
+        total_sales_this_month = month_sales.aggregate(t=Sum('total_amount'))['t'] or 0
+        
+        # Today Stats
+        today_sales = sales.filter(completed_at__gte=start_of_today)
+        sales_today = today_sales.aggregate(t=Sum('total_amount'))['t'] or 0
+        
+        # Average Invoice
+        avg_invoice = (total_sales_this_month / invoices_this_month) if invoices_this_month > 0 else 0
+        
+        # FBR Stats
+        sent_to_fbr = sales.filter(fbr_submission_status='SUCCESS').count()
+        pending_validation = sales.filter(fbr_submission_status='PENDING').count()
+        
+        # Failed FBR
+        failed_fbr = sales.filter(fbr_submission_status='FAILED').order_by('-completed_at').values(
+            'id', 'sale_number', 'fbr_error_message', 'completed_at'
+        )[:5]
+
+        # Recent Invoices
+        recent_invoices = sales.order_by('-completed_at').values(
+            'id', 'sale_number', 'customer__name', 'total_amount', 'completed_at', 'fbr_submission_status'
+        )[:5]
+        
+        # Sales Over Time Chart (Last 7 days)
+        chart_data = []
+        for i in range(7):
+            d = now - timedelta(days=6-i)
+            day_start = d.replace(hour=0, minute=0, second=0, microsecond=0)
+            day_end = day_start + timedelta(days=1)
+            day_sales = sales.filter(completed_at__gte=day_start, completed_at__lt=day_end).aggregate(t=Sum('total_amount'))['t'] or 0
+            chart_data.append({
+                "date": day_start.strftime('%Y-%m-%d'),
+                "total": float(day_sales)
+            })
+
+        return Response({
+            "products": {
+                "active": active_products,
+            },
+            "customers": {
+                "total": total_customers,
+            },
+            "invoices": {
+                "this_month_count": invoices_this_month,
+                "this_month_total": float(total_sales_this_month),
+            },
+            "stock": {
+                "value": float(stock_value),
+            },
+            "sales_today": float(sales_today),
+            "avg_invoice": float(avg_invoice),
+            "fbr": {
+                "sent": sent_to_fbr,
+                "pending": pending_validation,
+            },
+            "chart_data": chart_data,
+            "recent_invoices": list(recent_invoices),
+            "low_stock": list(low_stock_products),
+            "failed_fbr": list(failed_fbr),
+        })

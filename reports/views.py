@@ -581,3 +581,103 @@ def admin_user_activity(request):
         "total_events":  len(activity),
         "activity":      activity[:200],   # cap at 200 events per request
     })
+
+
+from django.utils.dateparse import parse_date
+from django.utils import timezone
+from datetime import date as date_type
+ 
+ 
+def _parse_export_params(request):
+    """Parse common export parameters from request."""
+    today     = timezone.now().date()
+    date_from = parse_date(
+        request.query_params.get("from", str(today))
+    ) or today
+    date_to   = parse_date(
+        request.query_params.get("to", str(today))
+    ) or today
+    fmt       = request.query_params.get("format", "excel").lower()
+    return date_from, date_to, fmt
+ 
+ 
+@api_view(["GET"])
+@permission_classes([IsActiveUser])
+def export_daily_sales(request):
+    """
+    GET /api/reports/export/daily-sales/?from=&to=&format=excel|pdf
+ 
+    Exports daily sales summary.
+    Returns S3 URL of generated file.
+    """
+    from reports.exporters import DailySalesExporter
+    date_from, date_to, fmt = _parse_export_params(request)
+    exporter = DailySalesExporter(request.user.company, date_from, date_to)
+ 
+    url = exporter.export_excel() if fmt == "excel" else exporter.export_pdf()
+    return Response({"url": url, "format": fmt, "type": "daily_sales"})
+ 
+ 
+@api_view(["GET"])
+@permission_classes([IsActiveUser])
+def export_monthly_sales(request):
+    """
+    GET /api/reports/export/monthly-sales/?year=2025&format=excel|pdf
+    """
+    from reports.exporters import MonthlySalesExporter
+    year     = int(request.query_params.get("year", timezone.now().year))
+    fmt      = request.query_params.get("format", "excel").lower()
+    exporter = MonthlySalesExporter(request.user.company, year)
+ 
+    url = exporter.export_excel() if fmt == "excel" else exporter.export_pdf()
+    return Response({"url": url, "format": fmt, "type": "monthly_sales",
+                     "year": year})
+ 
+ 
+@api_view(["GET"])
+@permission_classes([IsActiveUser])
+def export_product_sales(request):
+    """
+    GET /api/reports/export/product-sales/?from=&to=&format=excel|pdf&limit=100
+    """
+    from reports.exporters import ProductSalesExporter
+    date_from, date_to, fmt = _parse_export_params(request)
+    limit    = int(request.query_params.get("limit", 100))
+    exporter = ProductSalesExporter(
+        request.user.company, date_from, date_to, limit
+    )
+ 
+    url = exporter.export_excel() if fmt == "excel" else exporter.export_pdf()
+    return Response({"url": url, "format": fmt, "type": "product_sales"})
+ 
+ 
+@api_view(["GET"])
+@permission_classes([IsActiveUser])
+def export_cashier_sales(request):
+    """
+    GET /api/reports/export/cashier-sales/?from=&to=&format=excel|pdf
+    """
+    from reports.exporters import CashierSalesExporter
+    date_from, date_to, fmt = _parse_export_params(request)
+    exporter = CashierSalesExporter(
+        request.user.company, date_from, date_to
+    )
+ 
+    url = exporter.export_excel() if fmt == "excel" else exporter.export_pdf()
+    return Response({"url": url, "format": fmt, "type": "cashier_sales"})
+ 
+ 
+@api_view(["GET"])
+@permission_classes([IsActiveUser])
+def export_fbr_status(request):
+    """
+    GET /api/reports/export/fbr-status/?from=&to=&format=excel|pdf
+    """
+    from reports.exporters import FBRStatusExporter
+    date_from, date_to, fmt = _parse_export_params(request)
+    exporter = FBRStatusExporter(
+        request.user.company, date_from, date_to
+    )
+ 
+    url = exporter.export_excel() if fmt == "excel" else exporter.export_pdf()
+    return Response({"url": url, "format": fmt, "type": "fbr_status"})

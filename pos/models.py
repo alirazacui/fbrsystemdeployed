@@ -65,19 +65,43 @@ class UnitOfMeasure(models.TextChoices):
     Admin can also type a custom value via fbr_uom_custom field.
     """
     NUMBERS_PIECES = "Numbers, pieces, units", _("Numbers / Pieces / Units")
-    KG             = "KG",                    _("Kilogram (KG)")
-    GRAM           = "Gram",                  _("Gram")
-    LITRE          = "Litre",                 _("Litre")
-    ML             = "ML",                    _("Millilitre (ML)")
-    METRE          = "Metre",                 _("Metre")
-    SQ_METRE       = "Square Metre",          _("Square Metre")
-    KWH            = "KWH",                   _("Kilowatt Hour (KWH)")
-    TON            = "Ton",                   _("Ton")
-    DOZEN          = "Dozen",                 _("Dozen")
-    PACK           = "Pack",                  _("Pack")
+    KWH_1000       = "1000 kWh",              _("Thousand Kilowatt Hours")
+    KG_40          = "40 KG",                 _("40 Kilogram bag")
+    BAG            = "Bag",                   _("Bag")
+    BARRELS        = "Barrels",               _("Barrels")
+    BILL_OF_LADING = "Bill of Lading",        _("Bill of Lading")
+    BOTTLE         = "Bottle",                _("Bottle")
     BOX            = "Box",                   _("Box")
+    BUNDLE         = "Bundle",                _("Bundle")
+    CARAT          = "Carat",                 _("Carat")
+    CARTON         = "Carton",                _("Carton")
+    CASE           = "Case",                  _("Case")
+    CUBIC_METRE    = "Cubic Metre",           _("Cubic Metre")
+    DOZEN          = "Dozen",                 _("Dozen")
+    DRUM           = "Drum",                  _("Drum")
+    FOOT           = "Foot",                  _("Foot")
+    GALLON         = "Gallon",                _("Gallon")
+    GRAM           = "Gram",                  _("Gram")
+    INCH           = "Inch",                  _("Inch")
+    KG             = "KG",                    _("Kilogram (KG)")
+    KWH            = "KWH",                   _("Kilowatt Hour (KWH)")
+    LITRE          = "Litre",                 _("Litre")
+    MEGA_WATT      = "Mega Watt (MW)",        _("Mega Watt (MW)")
+    METRE          = "Metre",                 _("Metre")
+    METRIC_TON     = "Metric Ton",            _("Metric Ton")
+    MMBTU          = "Million BTU (MMBTU)",   _("Million BTU (MMBTU)")
+    PACK           = "Pack",                  _("Pack / Packet")
+    PAIR           = "Pair",                  _("Pair")
+    PALLET         = "Pallet",                _("Pallet")
+    PIECE          = "Piece",                 _("Piece")
+    ROLL           = "Roll",                  _("Roll")
     SET            = "Set",                   _("Set")
-
+    SHEET          = "Sheet",                 _("Sheet")
+    SQ_FOOT        = "Square Foot",           _("Square Foot")
+    SQ_METRE       = "Square Metre",          _("Square Metre")
+    TON            = "Ton",                   _("Ton")
+    TUBE           = "Tube",                  _("Tube")
+    YARD           = "Yard",                  _("Yard")
 
 class FBRSaleType(models.TextChoices):
     """
@@ -147,6 +171,15 @@ class Category(models.Model):
         on_delete=models.CASCADE,
         related_name="categories",
         verbose_name=_("Company"),
+    )
+
+    parent = models.ForeignKey(
+        'self',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='subcategories',
+        verbose_name=_("Parent Category")
     )
 
     name = models.CharField(
@@ -668,7 +701,7 @@ class Customer(models.Model):
     )
 
     ntn_cnic = models.CharField(
-        max_length=15,
+        max_length=50,
         blank=True,
         verbose_name=_("NTN / CNIC"),
         help_text=_(
@@ -680,7 +713,7 @@ class Customer(models.Model):
     )
 
     registration_type = models.CharField(
-        max_length=15,
+        max_length=50,
         choices=BuyerRegistrationType.choices,
         default=BuyerRegistrationType.UNREGISTERED,
         verbose_name=_("Registration Type"),
@@ -771,6 +804,39 @@ class Customer(models.Model):
     created_at = models.DateTimeField(auto_now_add=True, verbose_name=_("Created At"))
     updated_at = models.DateTimeField(auto_now=True,     verbose_name=_("Updated At"))
 
+    cnic = models.CharField(
+        max_length=20,
+        blank=True,
+        default="",
+        verbose_name=_("CNIC"),
+    )
+    ntn = models.CharField(
+        max_length=20,
+        blank=True,
+        default="",
+        verbose_name=_("NTN"),
+    )
+    credit_limit = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=0.00,
+        verbose_name=_("Credit Limit (Rs)"),
+    )
+    notes = models.TextField(
+        blank=True,
+        default="",
+        verbose_name=_("Notes"),
+    )
+
+    def save(self, *args, **kwargs):
+        if self.ntn:
+            self.ntn_cnic = self.ntn.strip()
+        elif self.cnic:
+            self.ntn_cnic = self.cnic.strip()
+        else:
+            self.ntn_cnic = ""
+        super().save(*args, **kwargs)
+
     # ------------------------------------------------------------------
     # Meta
     # ------------------------------------------------------------------
@@ -798,7 +864,6 @@ class Customer(models.Model):
                 name="unique_ntn_cnic_per_company",
             ),
         ]
-
     def __str__(self):
         reg = "✓" if self.registration_type == BuyerRegistrationType.REGISTERED else "—"
         return f"{self.name} [{reg} NTN: {self.ntn_cnic or 'N/A'}]"
@@ -840,6 +905,48 @@ class Customer(models.Model):
 
 
 # ---------------------------------------------------------------------------
+# HS Code Catalog
+# ---------------------------------------------------------------------------
+
+class HSCode(models.Model):
+    """
+    Catalog of official FBR PRAL HS Codes.
+    Used for lookup when creating products.
+    """
+    code = models.CharField(
+        max_length=20, 
+        unique=True, 
+        verbose_name=_("HS Code")
+    )
+    description = models.TextField(
+        verbose_name=_("Description")
+    )
+    default_rate = models.CharField(
+        max_length=10, 
+        blank=True, 
+        null=True, 
+        verbose_name=_("Default Rate")
+    )
+    uom = models.CharField(
+        max_length=50, 
+        blank=True, 
+        null=True, 
+        verbose_name=_("Default Unit of Measure")
+    )
+
+    class Meta:
+        verbose_name = _("HS Code")
+        verbose_name_plural = _("HS Codes")
+        ordering = ["code"]
+        indexes = [
+            models.Index(fields=["code"]),
+        ]
+
+    def __str__(self):
+        return f"{self.code} - {self.description[:50]}"
+
+
+# ---------------------------------------------------------------------------
 # Signal — auto-create walk-in customer when a Company is activated
 # ---------------------------------------------------------------------------
 
@@ -867,6 +974,19 @@ def create_walkin_customer(sender, instance, created, **kwargs):
             "province":          ProvinceChoice.PUNJAB,
             "address":           "Pakistan",
             "is_active":         True,
+        }
+    )
+
+    CompanyPaymentMethodSettings.objects.get_or_create(
+        company=instance,
+        defaults={
+            "is_cash_enabled": True,
+            "is_card_enabled": False,
+            "is_easypaisa_enabled": False,
+            "is_jazzcash_enabled": False,
+            "is_raast_enabled": False,
+            "is_bank_transfer_enabled": False,
+            "is_cheque_enabled": False,
         }
     )
 
@@ -928,6 +1048,44 @@ from django.utils.translation import gettext_lazy as _
 import uuid
 
 
+from config.storage_backends import payment_qr_upload_path
+
+# ---------------------------------------------------------------------------
+# Company Payment Settings
+# ---------------------------------------------------------------------------
+
+class CompanyPaymentMethodSettings(models.Model):
+    company = models.OneToOneField("companies.Company", on_delete=models.CASCADE, related_name="payment_settings")
+    
+    is_cash_enabled = models.BooleanField(default=True)
+    is_card_enabled = models.BooleanField(default=False)
+    is_easypaisa_enabled = models.BooleanField(default=False)
+    is_jazzcash_enabled = models.BooleanField(default=False)
+    is_raast_enabled = models.BooleanField(default=False)
+    is_bank_transfer_enabled = models.BooleanField(default=False)
+    is_cheque_enabled = models.BooleanField(default=False)
+    
+    easypaisa_merchant_id = models.CharField(max_length=100, blank=True)
+    easypaisa_qr_image = models.ImageField(upload_to=payment_qr_upload_path, blank=True, null=True)
+    
+    jazzcash_merchant_id = models.CharField(max_length=100, blank=True)
+    jazzcash_qr_image = models.ImageField(upload_to=payment_qr_upload_path, blank=True, null=True)
+    
+    raast_iban = models.CharField(max_length=100, blank=True)
+    raast_qr_image = models.ImageField(upload_to=payment_qr_upload_path, blank=True, null=True)
+    
+    bank_name = models.CharField(max_length=100, blank=True)
+    bank_account_name = models.CharField(max_length=100, blank=True)
+    bank_iban = models.CharField(max_length=100, blank=True)
+
+    class Meta:
+        verbose_name = _("Payment Settings")
+        verbose_name_plural = _("Payment Settings")
+
+    def __str__(self):
+        return f"Payment Settings - {self.company.business_name}"
+
+
 # ---------------------------------------------------------------------------
 # Choices
 # ---------------------------------------------------------------------------
@@ -958,13 +1116,17 @@ class PaymentMethod(models.TextChoices):
     CARD          = "card",          _("Card (Debit/Credit)")
     CHEQUE        = "cheque",        _("Cheque")
     BANK_TRANSFER = "bank_transfer", _("Bank Transfer")
+    JAZZCASH      = "jazzcash",      _("JazzCash")
+    EASYPAISA     = "easypaisa",     _("EasyPaisa")
+    RAAST         = "raast",         _("Raast")
 
 
 class FBRSubmissionStatus(models.TextChoices):
-    PENDING  = "pending",  _("Pending — not yet submitted to FBR")
-    SUCCESS  = "success",  _("Submitted & Validated by FBR")
-    FAILED   = "failed",   _("Submission Failed")
-    SKIPPED  = "skipped",  _("Skipped — FBR DI not enabled for this company")
+    PENDING   = "pending",   _("Pending — not yet submitted to FBR")
+    VALIDATED = "validated", _("Validated (Dry-run)")
+    SUCCESS   = "success",   _("Submitted & Validated by FBR")
+    FAILED    = "failed",    _("Submission Failed")
+    SKIPPED   = "skipped",   _("Skipped — FBR DI not enabled for this company")
 
 
 # ---------------------------------------------------------------------------
@@ -1437,14 +1599,16 @@ class Sale(models.Model):
         Recompute all financial totals from SaleLines.
         Call this after adding/editing lines, before completing the sale.
         """
-        lines = self.lines.all()
-
+        # Bypass prefetch cache by querying the DB directly
+        lines = list(self.lines.all().order_by('id'))
+        
         self.subtotal         = sum(l.unit_price * l.quantity for l in lines)
         self.total_discount   = sum(l.discount_amount for l in lines)
         self.total_tax        = sum(l.sales_tax_applicable for l in lines)
         self.total_further_tax = sum(l.further_tax for l in lines)
         self.total_fed        = sum(l.fed_payable for l in lines)
         self.total_amount     = sum(l.line_total for l in lines)
+        
         self.save(update_fields=[
             "subtotal", "total_discount", "total_tax",
             "total_further_tax", "total_fed", "total_amount",
@@ -1675,7 +1839,7 @@ class SaleLine(models.Model):
 
     @classmethod
     def from_product(cls, sale, product, quantity: float,
-                     discount_amount: float = 0) -> "SaleLine":
+                     discount_amount: float = 0, unit_price: float = None) -> "SaleLine":
         """
         Factory method — creates a SaleLine from a Product,
         snapshotting all FBR fields at the current moment.
@@ -1684,6 +1848,8 @@ class SaleLine(models.Model):
             line = SaleLine.from_product(sale, product, quantity=2)
             line.save()
         """
+        actual_price = unit_price if unit_price is not None else float(product.selling_price)
+        
         return cls(
             sale               = sale,
             product            = product,
@@ -1693,7 +1859,7 @@ class SaleLine(models.Model):
             fbr_sale_type      = product.fbr_sale_type,
             tax_rate_percent   = product.tax_rate_percent,
             quantity           = quantity,
-            unit_price         = product.selling_price,
+            unit_price         = actual_price,
             discount_amount    = discount_amount,
             sales_tax_withheld = product.fbr_sales_tax_withheld,
             further_tax        = product.fbr_further_tax,
@@ -1725,7 +1891,7 @@ class SaleLine(models.Model):
             "sroItemSerialNo":                 self.sro_item_serial_no or "",
             "fedPayable":                      float(self.fed_payable),
             "discount":                        float(self.discount_amount),
-            "totalValues":                     float(self.line_total),
+            "totalValues":                     0.0,
             "saleType":                        self.fbr_sale_type,
         }
 
@@ -2168,3 +2334,427 @@ class SaleReturnLine(models.Model):
         self.return_line_total     = round(
             float(self.return_value_excl_tax) + float(self.return_tax), 2
         )
+
+
+
+"""
+========================================================
+pos/debit_note_models.py
+Add to pos/models.py
+ 
+Debit Note flow:
+1. Cashier selects original completed sale
+2. Selects reason (forgotten items / price correction / service charge)
+3. Adds items or charges to the debit note
+4. Collects payment from customer immediately
+5. System creates a Debit Note Sale linked to original
+6. Debit Note submitted to FBR as 'Debit Note' invoice type
+ 
+FBR rules for Debit Notes (from PRAL manual):
+- Must reference original FBR invoice number (invoiceRefNo)
+- Must be within 72 hours of original invoice
+- invoiceType must be exactly "Debit Note"
+- Each item can only be edited ONCE
+- 10% limit of last month's sales applies
+ 
+Key difference from Credit Note:
+- Credit Note → money back to customer (return)
+- Debit Note  → customer pays MORE (additional charge)
+========================================================
+"""
+ 
+from django.core.validators import MinValueValidator
+from django.db import models
+from django.utils import timezone
+from django.utils.translation import gettext_lazy as _
+ 
+ 
+class DebitNoteReason(models.TextChoices):
+    FORGOTTEN_ITEMS    = "forgotten_items",    _("Forgotten Items — items missed on original invoice")
+    PRICE_CORRECTION   = "price_correction",   _("Price Correction — item was undercharged")
+    SERVICE_CHARGE     = "service_charge",     _("Additional Service Charge")
+    OTHER              = "other",              _("Other")
+ 
+ 
+class DebitNoteStatus(models.TextChoices):
+    DRAFT     = "draft",     _("Draft")
+    COMPLETED = "completed", _("Completed & Paid")
+    CANCELLED = "cancelled", _("Cancelled")
+ 
+ 
+class DebitNote(models.Model):
+    """
+    One row = one debit note transaction.
+ 
+    Links back to original Sale via original_sale FK.
+    Customer pays the debit note amount immediately at POS.
+    Creates a Debit Note Sale that gets submitted to FBR.
+ 
+    FBR 72-hour rule is checked at creation time.
+    """
+ 
+    # ── Ownership ─────────────────────────────────────────────────────
+    company = models.ForeignKey(
+        "companies.Company",
+        on_delete=models.CASCADE,
+        related_name="debit_notes",
+        verbose_name=_("Company"),
+    )
+ 
+    original_sale = models.ForeignKey(
+        "pos.Sale",
+        on_delete=models.PROTECT,
+        related_name="debit_notes",
+        verbose_name=_("Original Sale"),
+        help_text=_(
+            "The completed sale this debit note is against. "
+            "Must have a valid FBR invoice number."
+        ),
+    )
+ 
+    # Debit Note Sale created automatically when debit note is completed
+    debit_note_sale = models.OneToOneField(
+        "pos.Sale",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="debit_note_record",
+        verbose_name=_("Debit Note Sale"),
+        help_text=_(
+            "Auto-created Debit Note Sale. "
+            "Submitted to FBR as a Debit Note invoice."
+        ),
+    )
+ 
+    processed_by = models.ForeignKey(
+        "users.User",
+        on_delete=models.PROTECT,
+        related_name="processed_debit_notes",
+        verbose_name=_("Processed By"),
+    )
+ 
+    # ── Debit note details ────────────────────────────────────────────
+    debit_note_number = models.CharField(
+        max_length=50,
+        unique=True,
+        verbose_name=_("Debit Note Number"),
+        help_text=_("Auto-generated. Format: DN-YYYY-NNNNNN"),
+    )
+ 
+    reason = models.CharField(
+        max_length=20,
+        choices=DebitNoteReason.choices,
+        default=DebitNoteReason.FORGOTTEN_ITEMS,
+        verbose_name=_("Reason"),
+    )
+ 
+    reason_notes = models.TextField(
+        blank=True,
+        verbose_name=_("Additional Notes"),
+        help_text=_("Required when reason is 'Other'. Shown on FBR debit note."),
+    )
+ 
+    status = models.CharField(
+        max_length=15,
+        choices=DebitNoteStatus.choices,
+        default=DebitNoteStatus.DRAFT,
+        verbose_name=_("Status"),
+    )
+ 
+    # ── Financial totals ──────────────────────────────────────────────
+    total_amount = models.DecimalField(
+        max_digits=14,
+        decimal_places=2,
+        default=0,
+        verbose_name=_("Total Amount"),
+        help_text=_("Sum of all debit note lines including tax."),
+    )
+ 
+    total_tax = models.DecimalField(
+        max_digits=14,
+        decimal_places=2,
+        default=0,
+        verbose_name=_("Total Tax"),
+    )
+ 
+    # ── Payment ───────────────────────────────────────────────────────
+    payment_method = models.CharField(
+        max_length=20,
+        choices=[
+            ("cash",          _("Cash")),
+            ("card",          _("Card")),
+            ("bank_transfer", _("Bank Transfer")),
+        ],
+        default="cash",
+        verbose_name=_("Payment Method"),
+        help_text=_("How customer paid the debit note amount."),
+    )
+ 
+    amount_paid = models.DecimalField(
+        max_digits=14,
+        decimal_places=2,
+        default=0,
+        verbose_name=_("Amount Paid"),
+    )
+ 
+    change_given = models.DecimalField(
+        max_digits=14,
+        decimal_places=2,
+        default=0,
+        verbose_name=_("Change Given"),
+    )
+ 
+    payment_collected = models.BooleanField(
+        default=False,
+        verbose_name=_("Payment Collected"),
+        help_text=_("True when customer has physically paid the debit note amount."),
+    )
+ 
+    payment_collected_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name=_("Payment Collected At"),
+    )
+ 
+    # ── FBR eligibility ───────────────────────────────────────────────
+    fbr_eligible = models.BooleanField(
+        default=True,
+        verbose_name=_("FBR Debit Note Eligible"),
+        help_text=_(
+            "False if original invoice is older than 72 hours. "
+            "If False, debit note is processed internally only."
+        ),
+    )
+ 
+    fbr_eligibility_reason = models.CharField(
+        max_length=255,
+        blank=True,
+        verbose_name=_("FBR Ineligibility Reason"),
+    )
+ 
+    # ── Timestamps ────────────────────────────────────────────────────
+    created_at   = models.DateTimeField(auto_now_add=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    updated_at   = models.DateTimeField(auto_now=True)
+ 
+    class Meta:
+        verbose_name        = _("Debit Note")
+        verbose_name_plural = _("Debit Notes")
+        ordering            = ["-created_at"]
+        indexes = [
+            models.Index(
+                fields=["company", "status"],
+                name="debitnote_company_status_idx"
+            ),
+            models.Index(
+                fields=["original_sale"],
+                name="debitnote_original_sale_idx"
+            ),
+        ]
+ 
+    def __str__(self):
+        return f"{self.debit_note_number} → {self.original_sale.sale_number}"
+ 
+    def save(self, *args, **kwargs):
+        if not self.debit_note_number:
+            self.debit_note_number = self._generate_number()
+        super().save(*args, **kwargs)
+ 
+    def _generate_number(self) -> str:
+        year  = timezone.now().year
+        count = DebitNote.objects.filter(company=self.company).count() + 1
+        return f"DN-{year}-{count:06d}"
+ 
+    def check_fbr_eligibility(self):
+        """Checks FBR 72-hour rule."""
+        original = self.original_sale
+ 
+        if not original.fbr_invoice_number:
+            self.fbr_eligible           = False
+            self.fbr_eligibility_reason = (
+                "Original invoice was not submitted to FBR. "
+                "Debit note cannot be issued."
+            )
+            return
+ 
+        if original.completed_at:
+            hours_elapsed = (
+                timezone.now() - original.completed_at
+            ).total_seconds() / 3600
+ 
+            if hours_elapsed > 72:
+                self.fbr_eligible           = False
+                self.fbr_eligibility_reason = (
+                    f"Original invoice is {hours_elapsed:.0f} hours old. "
+                    f"FBR only allows debit notes within 72 hours."
+                )
+                return
+ 
+        self.fbr_eligible           = True
+        self.fbr_eligibility_reason = ""
+ 
+    def compute_totals(self):
+        """Recompute totals from lines."""
+        lines            = self.lines.all()
+        self.total_amount = sum(l.line_total for l in lines)
+        self.total_tax    = sum(l.tax_amount  for l in lines)
+        self.save(update_fields=[
+            "total_amount", "total_tax", "updated_at"
+        ])
+ 
+ 
+class DebitNoteLine(models.Model):
+    """
+    One row = one item or charge on the debit note.
+ 
+    For FORGOTTEN_ITEMS  → links to a Product
+    For PRICE_CORRECTION → links to original SaleLine
+    For SERVICE_CHARGE   → free-text description, no product
+    """
+ 
+    debit_note = models.ForeignKey(
+        DebitNote,
+        on_delete=models.CASCADE,
+        related_name="lines",
+        verbose_name=_("Debit Note"),
+    )
+ 
+    # Optional — for forgotten items and price corrections
+    product = models.ForeignKey(
+        "pos.Product",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="debit_note_lines",
+        verbose_name=_("Product"),
+    )
+ 
+    # Optional — for price corrections against original line
+    original_line = models.ForeignKey(
+        "pos.SaleLine",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="debit_note_lines",
+        verbose_name=_("Original Sale Line"),
+        help_text=_("For price corrections only."),
+    )
+ 
+    # ── Snapshot fields ───────────────────────────────────────────────
+    description = models.CharField(
+        max_length=255,
+        verbose_name=_("Description"),
+        help_text=_(
+            "Product name for forgotten items, "
+            "correction detail for price corrections, "
+            "charge description for service charges."
+        ),
+    )
+ 
+    hs_code = models.CharField(
+        max_length=20,
+        blank=True,
+        verbose_name=_("HS Code"),
+    )
+ 
+    unit_of_measure = models.CharField(
+        max_length=50,
+        default="Numbers, pieces, units",
+        verbose_name=_("Unit of Measure"),
+    )
+ 
+    fbr_sale_type = models.CharField(
+        max_length=80,
+        default="Goods at standard rate (default)",
+        verbose_name=_("FBR Sale Type"),
+    )
+ 
+    tax_rate_percent = models.CharField(
+        max_length=10,
+        default="18%",
+        verbose_name=_("Tax Rate"),
+    )
+ 
+    # ── Pricing ───────────────────────────────────────────────────────
+    quantity = models.DecimalField(
+        max_digits=12,
+        decimal_places=3,
+        default=1,
+        validators=[MinValueValidator(0.001)],
+        verbose_name=_("Quantity"),
+    )
+ 
+    unit_price = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        validators=[MinValueValidator(0)],
+        verbose_name=_("Unit Price (excl. tax)"),
+    )
+ 
+    value_excl_tax = models.DecimalField(
+        max_digits=14,
+        decimal_places=2,
+        default=0,
+        verbose_name=_("Value excl. Tax"),
+    )
+ 
+    tax_amount = models.DecimalField(
+        max_digits=14,
+        decimal_places=2,
+        default=0,
+        verbose_name=_("Tax Amount"),
+    )
+ 
+    line_total = models.DecimalField(
+        max_digits=14,
+        decimal_places=2,
+        default=0,
+        verbose_name=_("Line Total (incl. tax)"),
+    )
+ 
+    class Meta:
+        verbose_name        = _("Debit Note Line")
+        verbose_name_plural = _("Debit Note Lines")
+        ordering            = ["id"]
+ 
+    def __str__(self):
+        return f"{self.description} × {self.quantity} @ {self.unit_price}"
+ 
+    def save(self, *args, **kwargs):
+        self._compute_totals()
+        super().save(*args, **kwargs)
+ 
+    def _compute_totals(self):
+        qty      = float(self.quantity)
+        price    = float(self.unit_price)
+        tax_rate = float(
+            self.tax_rate_percent.replace("%", "")
+        ) / 100
+ 
+        self.value_excl_tax = round(price * qty, 2)
+        self.tax_amount     = round(self.value_excl_tax * tax_rate, 2)
+        self.line_total     = round(
+            float(self.value_excl_tax) + float(self.tax_amount), 2
+        )
+ 
+    def get_fbr_item_payload(self) -> dict:
+        """Returns FBR JSON item dict for this debit note line."""
+        return {
+            "hsCode":                          self.hs_code or "",
+            "productDescription":              self.description,
+            "rate":                            self.tax_rate_percent,
+            "uoM":                             self.unit_of_measure,
+            "quantity":                        float(self.quantity),
+            "valueSalesExcludingST":           float(self.value_excl_tax),
+            "fixedNotifiedValueOrRetailPrice": 0,
+            "salesTaxApplicable":              float(self.tax_amount),
+            "salesTaxWithheldAtSource":        0,
+            "extraTax":                        "",
+            "furtherTax":                      0,
+            "sroScheduleNo":                   "",
+            "sroItemSerialNo":                 "",
+            "fedPayable":                      0,
+            "discount":                        0,
+            "totalValues":                     float(self.line_total),
+            "saleType":                        self.fbr_sale_type,
+        }

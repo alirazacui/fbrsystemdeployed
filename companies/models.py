@@ -196,10 +196,10 @@ class Company(models.Model):
     )
 
     ntn = models.CharField(
-        max_length=15,
+        max_length=30,
         unique=True,
         verbose_name=_("NTN"),
-        help_text=_("National Tax Number — 7 digits (e.g. 1234567)"),
+        help_text=_("National Tax Number or CNIC"),
     )
 
     strn = models.CharField(
@@ -503,6 +503,12 @@ class Company(models.Model):
         ),
     )
 
+    fbr_sandbox_endpoint = models.URLField(
+        default="https://esp.pral.com.pk",
+        blank=True,
+        verbose_name=_("FBR Sandbox Endpoint"),
+    )
+
     fbr_production_token = models.TextField(
         blank=True,
         verbose_name=_("FBR Production Token"),
@@ -510,6 +516,12 @@ class Company(models.Model):
             "Issued automatically by IRIS once ALL assigned sandbox scenarios "
             "are cleared. Required before any live invoice can be submitted."
         ),
+    )
+
+    fbr_production_endpoint = models.URLField(
+        default="https://gw.fbr.gov.pk",
+        blank=True,
+        verbose_name=_("FBR Production Endpoint"),
     )
 
     fbr_test_buyer_ntn = models.CharField(
@@ -719,3 +731,32 @@ class Company(models.Model):
             for code, _ in FBR_SCENARIOS
             if getattr(self, f"fbr_scenario_{code}", False)
         ]
+
+class AuditLog(models.Model):
+    """
+    Immutable ledger tracking every significant action performed within a company.
+    Used for the Audit Log report.
+    """
+    company = models.ForeignKey(
+        Company,
+        on_delete=models.CASCADE,
+        related_name="audit_logs"
+    )
+    user_email = models.CharField(max_length=255, help_text="Email of the user or '(system)'")
+    entity_type = models.CharField(max_length=50, help_text="e.g. invoice, product, customer, fbr_token")
+    entity_id = models.CharField(max_length=100, help_text="UUID or ID of the entity")
+    action = models.CharField(max_length=50, help_text="e.g. create, update, delete, fbr_validated, resubmit")
+    ip_address = models.GenericIPAddressField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = _("Audit Log")
+        verbose_name_plural = _("Audit Logs")
+        indexes = [
+            models.Index(fields=["company", "-created_at"]),
+            models.Index(fields=["entity_type", "entity_id"]),
+        ]
+
+    def __str__(self):
+        return f"{self.created_at} - {self.user_email} - {self.action} {self.entity_type} {self.entity_id}"

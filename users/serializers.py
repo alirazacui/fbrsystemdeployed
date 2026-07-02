@@ -98,10 +98,14 @@ class UserListSerializer(serializers.ModelSerializer):
 class UserDetailSerializer(serializers.ModelSerializer):
     """
     Full detail — for retrieve and update (no password here).
+    Email and role are read-only to prevent accidental changes.
     """
     full_name    = serializers.CharField(source="get_full_name", read_only=True)
     company_name = serializers.CharField(
         source="company.business_name", read_only=True, default=None
+    )
+    company_id = serializers.IntegerField(
+        source="company.id", read_only=True, default=None
     )
     created_by_email = serializers.EmailField(
         source="created_by.email", read_only=True, default=None
@@ -119,6 +123,7 @@ class UserDetailSerializer(serializers.ModelSerializer):
             "role",
             "status",
             "company",
+            "company_id",
             "company_name",
             "created_by",
             "created_by_email",
@@ -127,7 +132,10 @@ class UserDetailSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = [
             "id",
+            "email",
+            "role",
             "full_name",
+            "company_id",
             "company_name",
             "created_by",
             "created_by_email",
